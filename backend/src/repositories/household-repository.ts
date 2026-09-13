@@ -17,8 +17,17 @@ export interface CreatedHousehold {
   createdAt: Date;
 }
 
+export interface ListedHousehold {
+  id: string;
+  name: string;
+  currencyCode: string;
+  role: 'owner' | 'member';
+  createdAt: Date;
+}
+
 export interface HouseholdRepository {
   createWithOwner(data: CreateHouseholdData): Promise<CreatedHousehold | null>;
+  listForMember(userId: string): Promise<ListedHousehold[]>;
 }
 
 export class TypeOrmHouseholdRepository implements HouseholdRepository {
@@ -57,5 +66,24 @@ export class TypeOrmHouseholdRepository implements HouseholdRepository {
         createdAt: savedHousehold.createdAt,
       };
     });
+  }
+
+  async listForMember(userId: string): Promise<ListedHousehold[]> {
+    const memberships = await this.dataSource
+      .getRepository(HouseholdMemberEntity)
+      .createQueryBuilder('member')
+      .innerJoinAndSelect('member.household', 'household')
+      .where('member.user_id = :userId', { userId })
+      .orderBy('household.created_at', 'DESC')
+      .addOrderBy('household.id', 'DESC')
+      .getMany();
+
+    return memberships.map((membership) => ({
+      id: membership.household.id,
+      name: membership.household.name,
+      currencyCode: membership.household.currencyCode,
+      role: membership.role,
+      createdAt: membership.household.createdAt,
+    }));
   }
 }

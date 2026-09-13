@@ -13,6 +13,7 @@ import type {
   CreatedHousehold,
   CreateHouseholdData,
   HouseholdRepository,
+  ListedHousehold,
 } from '../src/repositories/household-repository.js';
 import { TypeOrmHouseholdRepository } from '../src/repositories/household-repository.js';
 import type { CreateUserData, UserRepository } from '../src/repositories/user-repository.js';
@@ -37,7 +38,7 @@ interface StoredHousehold {
 interface StoredMembership {
   householdId: string;
   userId: string;
-  role: 'owner';
+  role: 'owner' | 'member';
 }
 
 class StubUserRepository implements UserRepository {
@@ -61,6 +62,7 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
   constructor(
     private readonly existingUserId: string | null = AUTHENTICATED_USER_ID,
     private readonly membershipError?: Error,
+    private readonly listError?: Error,
   ) {}
 
   async createWithOwner(data: CreateHouseholdData): Promise<CreatedHousehold | null> {
@@ -94,6 +96,40 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
       role: 'owner',
       createdAt: household.createdAt,
     };
+  }
+
+  async listForMember(userId: string): Promise<ListedHousehold[]> {
+    if (this.listError) {
+      throw this.listError;
+    }
+
+    const rows = this.memberships
+      .filter((membership) => membership.userId === userId)
+      .map((membership) => {
+        const household = this.households.find(
+          (candidate) => candidate.id === membership.householdId,
+        );
+
+        if (!household) {
+          return null;
+        }
+
+        return {
+          id: household.id,
+          name: household.name,
+          currencyCode: household.currencyCode,
+          role: membership.role,
+          createdAt: household.createdAt,
+        };
+      })
+      .filter((row): row is ListedHousehold => row !== null);
+
+    rows.sort(
+      (left, right) =>
+        right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id),
+    );
+
+    return rows;
   }
 }
 
@@ -272,6 +308,338 @@ describe('POST /api/households', () => {
   });
 });
 
+describe('GET /api/households', () => {
+  function seedHousehold(
+    households: InMemoryHouseholdRepository,
+    data: {
+      id: string;
+      name: string;
+      createdBy: string;
+      createdAt: Date;
+      membershipUserId?: string;
+      membershipRole?: 'owner' | 'member';
+    },
+  ): void {
+    households.households.push({
+      id: data.id,
+      name: data.name,
+      currencyCode: 'BRL',
+      createdBy: data.createdBy,
+      createdAt: data.createdAt,
+    });
+
+    if (data.membershipUserId) {
+      households.memberships.push({
+        householdId: data.id,
+        userId: data.membershipUserId,
+        role: data.membershipRole ?? 'owner',
+      });
+    }
+  }
+
+  it('returns 200 for an authenticated user with no households', async () => {
+    const households = new InMemoryHouseholdRepository();
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: [] });
+  });
+
+  it('returns only the households the authenticated user is a member of', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Martins',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-12T15:00:00.000Z'),
+      membershipUserId: OTHER_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0]).toMatchObject({
+      id: expect.any(String),
+      name: 'Casa Sousa',
+      currencyCode: 'BRL',
+    });
+    expect(response.body.data).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'Casa Martins' })]),
+    );
+  });
+
+  it('does not return a household of another user without membership', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Martins',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: OTHER_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: [] });
+  });
+
+  it('returns a household created by another user when the authenticated user is a member', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+      membershipRole: 'member',
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({ name: 'Casa Sousa', role: 'member' });
+  });
+
+  it('returns the owner role for the households the user owns', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({
+      id: expect.any(String),
+      name: 'Casa Sousa',
+      role: 'owner',
+    });
+  });
+
+  it('exposes the member role alongside the household', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+      membershipRole: 'member',
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({
+      id: expect.any(String),
+      name: 'Casa Sousa',
+      role: 'member',
+    });
+  });
+
+  it('does not grant access to a household created by the user without a membership', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Orfã',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: [] });
+  });
+
+  it('does not leak created_by, timestamps or internal relations', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toEqual({
+      id: expect.any(String),
+      name: 'Casa Sousa',
+      currencyCode: 'BRL',
+      role: 'owner',
+      createdAt: '2026-09-13T15:00:00.000Z',
+    });
+    for (const forbiddenField of [
+      'createdBy',
+      'created_by',
+      'updatedAt',
+      'updated_at',
+      'members',
+      'categories',
+      'transactions',
+      'createdByEmail',
+    ]) {
+      expect(response.body.data[0]).not.toHaveProperty(forbiddenField);
+    }
+  });
+
+  it('returns 401 without an access token', async () => {
+    const app = createTestApp(new InMemoryHouseholdRepository());
+
+    const response = await request(app).get('/api/households');
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Authentication required',
+      },
+    });
+  });
+
+  it('returns 401 for an invalid access token', async () => {
+    const app = createTestApp(new InMemoryHouseholdRepository());
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', 'Bearer invalid-token');
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('does not let query or body parameters override the authenticated identity', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      createdBy: OTHER_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: OTHER_USER_ID,
+    });
+    seedHousehold(households, {
+      id: randomUUID(),
+      name: 'Casa Haru',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-12T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households?userId=${OTHER_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userId: OTHER_USER_ID });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0]).toMatchObject({ name: 'Casa Haru' });
+  });
+
+  it('returns a sanitized 500 when the repository fails', async () => {
+    const households = new InMemoryHouseholdRepository(
+      AUTHENTICATED_USER_ID,
+      undefined,
+      new Error('listing database details'),
+    );
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'Internal server error',
+      },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('listing database details');
+  });
+
+  it('orders households deterministically by createdAt DESC and id DESC', async () => {
+    const households = new InMemoryHouseholdRepository();
+    seedHousehold(households, {
+      id: '00000000-0000-4000-8000-000000000001',
+      name: 'Casa Um',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    seedHousehold(households, {
+      id: '00000000-0000-4000-8000-000000000002',
+      name: 'Casa Dois',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+      membershipUserId: AUTHENTICATED_USER_ID,
+    });
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .get('/api/households')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((household: { id: string }) => household.id)).toEqual([
+      '00000000-0000-4000-8000-000000000002',
+      '00000000-0000-4000-8000-000000000001',
+    ]);
+  });
+});
+
 describe('TypeOrmHouseholdRepository', () => {
   it('runs household and owner creation in one transaction that rejects on membership failure', async () => {
     const creator = Object.assign(new UserEntity(), { id: AUTHENTICATED_USER_ID });
@@ -319,5 +687,80 @@ describe('TypeOrmHouseholdRepository', () => {
     ).rejects.toThrow('membership failed');
     expect(transactionCalls).toBe(1);
     expect(saveCalls).toBe(2);
+  });
+
+  it('lists member households with a single joined query', async () => {
+    class FakeQueryBuilder {
+      private queryCalls = 0;
+
+      constructor(private readonly rows: HouseholdMemberEntity[]) {}
+
+      innerJoinAndSelect(_path: string, _alias: string): FakeQueryBuilder {
+        return this;
+      }
+
+      where(_condition: string, _params: Record<string, string>): FakeQueryBuilder {
+        return this;
+      }
+
+      orderBy(_column: string, _direction: 'ASC' | 'DESC'): FakeQueryBuilder {
+        return this;
+      }
+
+      addOrderBy(_column: string, _direction: 'ASC' | 'DESC'): FakeQueryBuilder {
+        return this;
+      }
+
+      async getMany(): Promise<HouseholdMemberEntity[]> {
+        this.queryCalls += 1;
+        return this.rows;
+      }
+
+      get count(): number {
+        return this.queryCalls;
+      }
+    }
+
+    const expectedHousehold = {
+      id: randomUUID(),
+      name: 'Casa Sousa',
+      currencyCode: 'BRL',
+      createdAt: new Date('2026-09-13T15:00:00.000Z'),
+    };
+    const builder = new FakeQueryBuilder([
+      Object.assign(new HouseholdMemberEntity(), {
+        id: randomUUID(),
+        role: 'owner',
+        joinedAt: new Date(),
+        household: Object.assign(new HouseholdEntity(), {
+          ...expectedHousehold,
+          updatedAt: new Date(),
+        }),
+        user: Object.assign(new UserEntity(), { id: AUTHENTICATED_USER_ID }),
+      }),
+    ]);
+    const dataSource = {
+      getRepository(_entity: unknown): {
+        createQueryBuilder(_alias: string): FakeQueryBuilder;
+      } {
+        return {
+          createQueryBuilder: () => builder,
+        };
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmHouseholdRepository(dataSource);
+
+    const result = await repository.listForMember(AUTHENTICATED_USER_ID);
+
+    expect(builder.count).toBe(1);
+    expect(result).toEqual([
+      {
+        id: expectedHousehold.id,
+        name: expectedHousehold.name,
+        currencyCode: expectedHousehold.currencyCode,
+        role: 'owner',
+        createdAt: expectedHousehold.createdAt,
+      },
+    ]);
   });
 });

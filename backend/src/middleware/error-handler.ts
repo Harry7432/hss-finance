@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler } from 'express';
 
+import { ForbiddenError } from '../errors/forbidden-error.js';
 import { UnauthorizedError } from '../errors/unauthorized-error.js';
 
 function isMalformedJsonError(error: unknown): boolean {
@@ -15,6 +16,16 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, _ne
     response.status(401).json({
       error: {
         code: 'UNAUTHORIZED',
+        message: error.message,
+      },
+    });
+    return;
+  }
+
+  if (error instanceof ForbiddenError) {
+    response.status(403).json({
+      error: {
+        code: 'FORBIDDEN',
         message: error.message,
       },
     });

@@ -25,9 +25,29 @@ export interface ListedHousehold {
   createdAt: Date;
 }
 
+export interface ListedHouseholdMember {
+  userId: string;
+  name: string;
+  email: string;
+  role: 'owner' | 'member';
+  joinedAt: Date;
+}
+
+interface HouseholdMemberRow {
+  userId: string;
+  name: string;
+  email: string;
+  role: 'owner' | 'member';
+  joinedAt: Date | string;
+}
+
 export interface HouseholdRepository {
   createWithOwner(data: CreateHouseholdData): Promise<CreatedHousehold | null>;
   listForMember(userId: string): Promise<ListedHousehold[]>;
+  listMembersForMember(
+    householdId: string,
+    userId: string,
+  ): Promise<ListedHouseholdMember[] | null>;
 }
 
 export class TypeOrmHouseholdRepository implements HouseholdRepository {
@@ -84,6 +104,44 @@ export class TypeOrmHouseholdRepository implements HouseholdRepository {
       currencyCode: membership.household.currencyCode,
       role: membership.role,
       createdAt: membership.household.createdAt,
+    }));
+  }
+
+  async listMembersForMember(
+    householdId: string,
+    userId: string,
+  ): Promise<ListedHouseholdMember[] | null> {
+    const rows = await this.dataSource
+      .getRepository(HouseholdMemberEntity)
+      .createQueryBuilder('member')
+      .innerJoin('member.user', 'user')
+      .innerJoin(
+        HouseholdMemberEntity,
+        'viewer',
+        'viewer.household_id = member.household_id AND viewer.user_id = :userId',
+        { userId },
+      )
+      .select('user.id', 'userId')
+      .addSelect('user.name', 'name')
+      .addSelect('user.email', 'email')
+      .addSelect('member.role', 'role')
+      .addSelect('member.joined_at', 'joinedAt')
+      .where('member.household_id = :householdId', { householdId })
+      .orderBy("CASE WHEN member.role = 'owner' THEN 0 ELSE 1 END", 'ASC')
+      .addOrderBy('member.joined_at', 'ASC')
+      .addOrderBy('user.id', 'ASC')
+      .getRawMany<HouseholdMemberRow>();
+
+    if (rows.length === 0) {
+      return null;
+    }
+
+    return rows.map((row) => ({
+      userId: row.userId,
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      joinedAt: row.joinedAt instanceof Date ? row.joinedAt : new Date(row.joinedAt),
     }));
   }
 }

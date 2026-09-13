@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { jest } from '@jest/globals';
+import type { Express } from 'express';
 import { SignJWT } from 'jose';
 import request from 'supertest';
 import type { DataSource, EntityManager } from 'typeorm';
@@ -12,6 +13,7 @@ import { HouseholdMemberEntity } from '../src/database/entities/household-member
 import { TransactionEntity } from '../src/database/entities/transaction.entity.js';
 import { ForbiddenError } from '../src/errors/forbidden-error.js';
 import { InvalidCategoryError } from '../src/errors/invalid-category-error.js';
+import { TransactionNotFoundError } from '../src/errors/transaction-not-found-error.js';
 import type {
   CategoryRecord,
   CategoryRepository,
@@ -34,9 +36,11 @@ import {
   type ListTransactionsResult,
   type TransactionRecord,
   type TransactionRepository,
+  type TransactionStatus,
+  type UpdateTransactionData,
 } from '../src/repositories/transaction-repository.js';
 import type { CreateUserData, UserRepository } from '../src/repositories/user-repository.js';
-import type { UserEntity } from '../src/database/entities/user.entity.js';
+import { UserEntity } from '../src/database/entities/user.entity.js';
 
 const TEST_JWT_SECRET = Buffer.alloc(32, 3);
 const USER_ID = randomUUID();
@@ -132,6 +136,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
   readonly records: StoredTransaction[] = [];
   readonly createCalls: CreateTransactionData[] = [];
   readonly listCalls: ListTransactionsData[] = [];
+  readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
     householdId: string;
     userId: string;
@@ -150,6 +155,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
   constructor(
     private readonly createError?: Error,
     private readonly listError?: Error,
+    private readonly updateError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -236,6 +242,102 @@ class InMemoryTransactionRepository implements TransactionRepository {
       records: filtered.slice(offset, offset + data.limit),
       total: filtered.length,
     };
+  }
+
+  async updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord> {
+    this.updateCalls.push(data);
+
+    if (this.updateError) {
+      throw this.updateError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const index = this.records.findIndex(
+      (record) => record.id === data.transactionId && record.householdId === data.householdId,
+    );
+
+    const current = this.records[index];
+
+    if (index === -1 || current === undefined) {
+      throw new TransactionNotFoundError();
+    }
+
+    if (membership.role === 'member' && current.createdBy !== data.requesterId) {
+      throw new ForbiddenError();
+    }
+
+    const finalType = data.type ?? current.type;
+    const finalAmount = data.amount ?? current.amount;
+    const finalTransactionDate = data.transactionDate ?? current.transactionDate;
+    const finalDueDate = data.dueDate !== undefined ? data.dueDate : current.dueDate;
+    const finalDescription =
+      data.description !== undefined ? data.description : current.description;
+
+    let finalCategoryId: string | null;
+    let finalStatus: TransactionStatus;
+    let finalPaidAt: Date | null;
+
+    if (data.categoryId !== undefined && data.categoryId !== null) {
+      const category = this.categories.find(
+        (candidate) =>
+          candidate.id === data.categoryId && candidate.householdId === data.householdId,
+      );
+
+      if (!category || category.type !== finalType) {
+        throw new InvalidCategoryError();
+      }
+
+      finalCategoryId = data.categoryId;
+    } else if (data.categoryId === null) {
+      finalCategoryId = null;
+    } else {
+      finalCategoryId = current.categoryId;
+
+      if (finalCategoryId !== null) {
+        const category = this.categories.find(
+          (candidate) =>
+            candidate.id === finalCategoryId && candidate.householdId === data.householdId,
+        );
+
+        if (!category || category.type !== finalType) {
+          throw new InvalidCategoryError();
+        }
+      }
+    }
+
+    if (data.status === undefined) {
+      finalStatus = current.status;
+      finalPaidAt = current.paidAt;
+    } else if (data.status === 'paid') {
+      finalStatus = 'paid';
+      finalPaidAt = current.status === 'paid' ? current.paidAt : new Date();
+    } else {
+      finalStatus = 'pending';
+      finalPaidAt = null;
+    }
+
+    const updated: StoredTransaction = {
+      ...current,
+      type: finalType,
+      amount: finalAmount,
+      transactionDate: finalTransactionDate,
+      dueDate: finalDueDate,
+      categoryId: finalCategoryId,
+      description: finalDescription,
+      status: finalStatus,
+      paidAt: finalPaidAt,
+      updatedAt: new Date(),
+    };
+    this.records[index] = updated;
+    return updated;
   }
 }
 
@@ -1166,6 +1268,641 @@ describe('GET /api/households/:householdId/transactions', () => {
   });
 });
 
+describe('PATCH /api/households/:householdId/transactions/:transactionId', () => {
+  const patch = (
+    app: Express,
+    token: string,
+    transactionId: string,
+    payload: Record<string, unknown>,
+    householdId = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .patch(`/api/households/${householdId}/transactions/${transactionId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload);
+
+  it('allows an owner to edit their own transaction', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Edited' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: existing.id,
+      type: 'expense',
+      amount: '25.00',
+      description: 'Edited',
+      status: 'pending',
+      createdBy: USER_ID,
+      source: 'manual',
+    });
+    expect(transactions.records[0]).toMatchObject({
+      description: 'Edited',
+      householdId: HOUSEHOLD_ID,
+    });
+  });
+
+  it('allows an owner to edit a transaction created by a member', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ createdBy: OTHER_USER_ID });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { amount: '10.00' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ amount: '10.00', createdBy: OTHER_USER_ID });
+  });
+
+  it('allows a member to edit their own transaction', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Mine' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      description: 'Mine',
+      status: 'pending',
+      paidAt: null,
+    });
+  });
+
+  it('forbids a member from editing a transaction created by another member', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction({ createdBy: OTHER_USER_ID });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Nope' });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    expect(transactions.records[0]).toMatchObject({ description: existing.description });
+    expect(transactions.updateCalls).toHaveLength(1);
+  });
+
+  it('returns 403 for a user without membership', async () => {
+    const { app, transactions } = createTestContext();
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Denied' });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    expect(transactions.records[0]).toMatchObject({ description: existing.description });
+  });
+
+  it('returns 403 for a nonexistent household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Denied' }, randomUUID());
+
+    expect(response.status).toBe(403);
+    expect(transactions.records[0]).toMatchObject({ description: existing.description });
+  });
+
+  it('returns 404 for a nonexistent transaction inside an accessible household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, randomUUID(), { description: 'Missing' });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({
+      error: { code: 'TRANSACTION_NOT_FOUND', message: 'Transaction not found' },
+    });
+    expect(transactions.records[0]).toMatchObject({ description: existing.description });
+  });
+
+  it('returns 404 for a transaction that belongs to another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const otherHouseholdTransaction = storedTransaction({ householdId: OTHER_HOUSEHOLD_ID });
+    transactions.records.push(otherHouseholdTransaction);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, otherHouseholdTransaction.id, {
+      description: 'Missing',
+    });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({
+      error: { code: 'TRANSACTION_NOT_FOUND', message: 'Transaction not found' },
+    });
+    expect(transactions.records[0]).toMatchObject({
+      description: otherHouseholdTransaction.description,
+      householdId: OTHER_HOUSEHOLD_ID,
+    });
+  });
+
+  it('does not authorize edits through transaction authorship without membership', async () => {
+    const { app, transactions } = createTestContext();
+    const existing = storedTransaction({ createdBy: OTHER_USER_ID });
+    transactions.records.push(existing);
+    const token = await createToken(OTHER_USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'Should fail' });
+
+    expect(response.status).toBe(403);
+    expect(transactions.records[0]).toMatchObject({ description: existing.description });
+  });
+
+  it('edits the amount', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { amount: '99.99' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.amount).toBe('99.99');
+    expect(transactions.updateCalls[0]?.amount).toBe('99.99');
+  });
+
+  it('normalizes the amount to two decimal places', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { amount: '10' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.amount).toBe('10.00');
+    expect(transactions.records[0]?.amount).toBe('10.00');
+  });
+
+  it.each([
+    ['zero', '0'],
+    ['zero decimal', '0.00'],
+    ['negative', '-1'],
+    ['above scale', '10.123'],
+    ['above precision', '1000000000000.00'],
+    ['alphabetic', 'abc'],
+  ])('returns 400 for an invalid amount: %s', async (_caseName, amount) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { amount });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request payload' },
+    });
+    expect(transactions.updateCalls).toHaveLength(0);
+    expect(transactions.records[0]).toMatchObject({ amount: existing.amount });
+  });
+
+  it('edits the description', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'New description' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.description).toBe('New description');
+  });
+
+  it('removes the description with null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ description: 'To be removed' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.description).toBeNull();
+    expect(transactions.records[0]?.description).toBeNull();
+  });
+
+  it('returns 400 for a description above the schema limit', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, {
+      description: 'a'.repeat(256),
+    });
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('edits the transaction date', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { transactionDate: '2026-10-01' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.transactionDate).toBe('2026-10-01');
+  });
+
+  it.each([
+    ['an impossible transaction date', '2026-02-30'],
+    ['a year 0000 transaction date', '0000-01-01'],
+  ])('returns 400 for %s', async (_caseName, transactionDate) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { transactionDate });
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('edits the due date', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { dueDate: '2026-10-05' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.dueDate).toBe('2026-10-05');
+  });
+
+  it('removes the due date with null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ dueDate: '2026-09-20' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { dueDate: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.dueDate).toBeNull();
+  });
+
+  it('returns 400 for an invalid due date', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { dueDate: '2026-13-01' });
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('changes the category to a valid same-household category', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ categoryId: null });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { categoryId: EXPENSE_CATEGORY_ID });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.categoryId).toBe(EXPENSE_CATEGORY_ID);
+  });
+
+  it('removes the category with null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { categoryId: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.categoryId).toBeNull();
+  });
+
+  it.each([
+    ['a nonexistent category', randomUUID()],
+    ['a category from another household', CROSS_HOUSEHOLD_CATEGORY_ID],
+    ['a category with a different type', INCOME_CATEGORY_ID],
+  ])('returns INVALID_CATEGORY for %s', async (_caseName, categoryId) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { categoryId });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'INVALID_CATEGORY', message: 'Invalid category' },
+    });
+    expect(transactions.records[0]).toMatchObject({ categoryId: existing.categoryId });
+  });
+
+  it('rejects changing type while keeping an incompatible category', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { type: 'income' });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'INVALID_CATEGORY', message: 'Invalid category' },
+    });
+    expect(transactions.records[0]).toMatchObject({ type: 'expense' });
+  });
+
+  it('accepts changing type together with a compatible category', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, {
+      type: 'income',
+      categoryId: INCOME_CATEGORY_ID,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      type: 'income',
+      categoryId: INCOME_CATEGORY_ID,
+    });
+  });
+
+  it('accepts changing type together with a null category', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { type: 'income', categoryId: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ type: 'income', categoryId: null });
+  });
+
+  it('sets paidAt internally when a pending transaction becomes paid', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const beforeRequest = Date.now();
+    const response = await patch(app, token, existing.id, { status: 'paid' });
+    const afterRequest = Date.now();
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.status).toBe('paid');
+    expect(Date.parse(response.body.data.paidAt)).toBeGreaterThanOrEqual(beforeRequest);
+    expect(Date.parse(response.body.data.paidAt)).toBeLessThanOrEqual(afterRequest);
+    expect(transactions.records[0]?.paidAt).toBeInstanceOf(Date);
+  });
+
+  it('preserves the original paidAt when a paid transaction stays paid', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const paidAt = new Date('2026-09-01T10:00:00.000Z');
+    const existing = storedTransaction({ status: 'paid', paidAt });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { status: 'paid' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ status: 'paid' });
+    expect(response.body.data.paidAt).toBe(paidAt.toISOString());
+    expect(transactions.records[0]?.paidAt).toBe(paidAt);
+  });
+
+  it('clears paidAt when a paid transaction becomes pending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ status: 'paid', paidAt: NOW });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { status: 'pending' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ status: 'pending', paidAt: null });
+    expect(transactions.records[0]?.paidAt).toBeNull();
+  });
+
+  it('keeps paidAt null when a pending transaction stays pending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { status: 'pending' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ status: 'pending', paidAt: null });
+  });
+
+  it('returns 400 for an empty body', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, {});
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request payload' },
+    });
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['an invalid status', { status: 'overdue' }],
+    ['an invalid type', { type: 'transfer' }],
+    ['an invalid category UUID', { categoryId: 'not-a-uuid' }],
+  ])('returns 400 for %s', async (_caseName, payload) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, payload);
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .patch(`/api/households/not-a-uuid/transactions/${existing.id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ description: 'x' });
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid transaction UUID', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, 'not-a-uuid', { description: 'x' });
+
+    expect(response.status).toBe(400);
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['id', { id: randomUUID() }],
+    ['householdId', { householdId: OTHER_HOUSEHOLD_ID }],
+    ['createdBy', { createdBy: OTHER_USER_ID }],
+    ['created_by', { created_by: OTHER_USER_ID }],
+    ['userId', { userId: OTHER_USER_ID }],
+    ['source', { source: 'bank_import' }],
+    ['externalId', { externalId: 'external' }],
+    ['external_id', { external_id: 'external' }],
+    ['paidAt', { paidAt: NOW.toISOString() }],
+    ['createdAt', { createdAt: NOW.toISOString() }],
+    ['updatedAt', { updatedAt: NOW.toISOString() }],
+    ['a timestamps field', { timestamps: true }],
+    ['an extra field', { extra: true }],
+  ])('returns 400 without updating for %s in the payload', async (_caseName, payload) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, payload);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request payload' },
+    });
+    expect(transactions.updateCalls).toHaveLength(0);
+    expect(transactions.records[0]).toEqual(existing);
+  });
+
+  it('keeps createdBy, source, externalId and household immutable on edit', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'ok', amount: '10.00' });
+
+    expect(response.status).toBe(200);
+    expect(transactions.records[0]).toMatchObject({
+      createdBy: USER_ID,
+      source: 'manual',
+      externalId: null,
+      householdId: HOUSEHOLD_ID,
+    });
+    expect(response.body.data.createdBy).toBe(USER_ID);
+    expect(response.body.data.source).toBe('manual');
+  });
+
+  it('does not expose internal relations in the response', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'ok' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).not.toHaveProperty('household');
+    expect(response.body.data).not.toHaveProperty('category');
+    expect(response.body.data).not.toHaveProperty('user');
+    expect(response.body.data).not.toHaveProperty('externalId');
+  });
+
+  it('returns a sanitized 500 for an unexpected error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      new Error('sensitive update database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { description: 'x' });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive update database details');
+  });
+
+  it('returns 401 without a token', async () => {
+    const { app } = createTestContext();
+
+    const response = await request(app)
+      .patch(`/api/households/${HOUSEHOLD_ID}/transactions/${randomUUID()}`)
+      .send({ description: 'x' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+  });
+});
+
 describe('TypeOrmTransactionRepository', () => {
   it('checks membership and category under shared locks and forces protected insert fields', async () => {
     const membership = Object.assign(new HouseholdMemberEntity(), { id: randomUUID() });
@@ -1453,5 +2190,387 @@ describe('TypeOrmTransactionRepository', () => {
     expect(getRepository).toHaveBeenCalledTimes(1);
     expect(createQueryBuilder).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('updates the scoped transaction inside a transaction with pessimistic locks and preserves protected fields', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '150.90',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: 'Mercado',
+      status: 'paid',
+      paidAt: NOW,
+      source: 'manual',
+      externalId: null,
+      createdAt: NOW,
+      category: Object.assign(new CategoryEntity(), { id: EXPENSE_CATEGORY_ID, type: 'expense' }),
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    const category = Object.assign(new CategoryEntity(), {
+      id: INCOME_CATEGORY_ID,
+      type: 'income',
+    });
+    const findCalls: Array<{ entity: unknown; options: unknown }> = [];
+    let transactionCalls = 0;
+    let savedFields: Record<string, unknown> = {};
+    const manager = {
+      async findOne(entity: unknown, options: unknown): Promise<object | null> {
+        findCalls.push({ entity, options });
+        if (entity === HouseholdMemberEntity) {
+          return membership;
+        }
+
+        if (entity === TransactionEntity) {
+          return existing;
+        }
+
+        if (entity === CategoryEntity) {
+          return category;
+        }
+
+        return null;
+      },
+      async save(entity: TransactionEntity): Promise<TransactionEntity> {
+        savedFields = { ...entity };
+        return Object.assign(entity, { updatedAt: new Date('2026-09-14T10:00:00.000Z') });
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        transactionCalls += 1;
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.updateAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+      type: 'income',
+      amount: '10.00',
+      transactionDate: '2026-09-14',
+      dueDate: '2026-09-20',
+      categoryId: INCOME_CATEGORY_ID,
+      description: 'Edited',
+      status: 'pending',
+    });
+
+    expect(transactionCalls).toBe(1);
+    expect(findCalls).toHaveLength(3);
+    expect(findCalls[0]).toMatchObject({
+      entity: HouseholdMemberEntity,
+      options: {
+        select: { id: true, role: true },
+        where: { household: { id: HOUSEHOLD_ID }, user: { id: USER_ID } },
+        lock: { mode: 'pessimistic_read' },
+      },
+    });
+    expect(findCalls[1]).toMatchObject({
+      entity: TransactionEntity,
+      options: {
+        relations: { category: true, createdBy: true },
+        where: { id: existing.id, household: { id: HOUSEHOLD_ID } },
+        lock: { mode: 'pessimistic_write', tables: ['transactions'] },
+      },
+    });
+    expect(findCalls[2]).toMatchObject({
+      entity: CategoryEntity,
+      options: {
+        where: { id: INCOME_CATEGORY_ID, household: { id: HOUSEHOLD_ID } },
+        lock: { mode: 'pessimistic_read' },
+      },
+    });
+    expect(savedFields).toMatchObject({
+      type: 'income',
+      amount: '10.00',
+      transactionDate: '2026-09-14',
+      dueDate: '2026-09-20',
+      description: 'Edited',
+      status: 'pending',
+      paidAt: null,
+      category,
+    });
+    expect(result).toMatchObject({
+      id: existing.id,
+      type: 'income',
+      amount: '10.00',
+      transactionDate: '2026-09-14',
+      dueDate: '2026-09-20',
+      categoryId: INCOME_CATEGORY_ID,
+      description: 'Edited',
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      createdBy: OTHER_USER_ID,
+    });
+    expect(result.updatedAt.toISOString()).toBe('2026-09-14T10:00:00.000Z');
+  });
+
+  it('preserves the original paidAt when a paid transaction is updated as paid', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const paidAt = new Date('2026-09-01T10:00:00.000Z');
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '150.90',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'paid',
+      paidAt,
+      source: 'manual',
+      externalId: null,
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    let saveCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity
+          ? membership
+          : entity === TransactionEntity
+            ? existing
+            : null;
+      },
+      async save(entity: TransactionEntity): Promise<TransactionEntity> {
+        saveCalls += 1;
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.updateAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+      status: 'paid',
+    });
+
+    expect(saveCalls).toBe(1);
+    expect(result).toMatchObject({ status: 'paid' });
+    expect(result.paidAt).toBe(paidAt);
+  });
+
+  it('rejects a missing membership before reading the transaction', async () => {
+    let transactionReads = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        if (entity === HouseholdMemberEntity) {
+          return null;
+        }
+
+        transactionReads += 1;
+        return Object.assign(new TransactionEntity(), { id: randomUUID() });
+      },
+      async save(): Promise<never> {
+        throw new Error('Unexpected save');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.updateAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: randomUUID(),
+        description: 'x',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(transactionReads).toBe(0);
+  });
+
+  it('rejects a transaction outside the household with TransactionNotFoundError', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    let saveCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : null;
+      },
+      async save(): Promise<never> {
+        saveCalls += 1;
+        throw new Error('Unexpected save');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.updateAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: randomUUID(),
+        description: 'x',
+      }),
+    ).rejects.toBeInstanceOf(TransactionNotFoundError);
+    expect(saveCalls).toBe(0);
+  });
+
+  it('rejects a member editing a transaction created by another member', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'member',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '150.90',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    let saveCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity
+          ? membership
+          : entity === TransactionEntity
+            ? existing
+            : null;
+      },
+      async save(): Promise<never> {
+        saveCalls += 1;
+        throw new Error('Unexpected save');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.updateAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: existing.id,
+        description: 'x',
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(saveCalls).toBe(0);
+  });
+
+  it.each([
+    [
+      'an incompatible kept category',
+      { id: INCOME_CATEGORY_ID, type: 'income' },
+      { type: 'income' },
+      InvalidCategoryError,
+    ],
+    [
+      'a wrong-type replacement category',
+      { id: INCOME_CATEGORY_ID, type: 'income' },
+      { type: 'expense', categoryId: INCOME_CATEGORY_ID },
+      InvalidCategoryError,
+    ],
+  ] as const)('rejects %s before saving', async (_caseName, replacementData, input, errorType) => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '150.90',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      createdAt: NOW,
+      category: Object.assign(new CategoryEntity(), {
+        id: EXPENSE_CATEGORY_ID,
+        type: 'expense',
+      }),
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    const replacement = Object.assign(new CategoryEntity(), replacementData);
+    let saveCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        if (entity === HouseholdMemberEntity) {
+          return membership;
+        }
+
+        if (entity === TransactionEntity) {
+          return existing;
+        }
+
+        if (entity === CategoryEntity) {
+          return replacement;
+        }
+
+        return null;
+      },
+      async save(): Promise<never> {
+        saveCalls += 1;
+        throw new Error('Unexpected save');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.updateAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: existing.id,
+        ...input,
+      }),
+    ).rejects.toBeInstanceOf(errorType);
+    expect(saveCalls).toBe(0);
   });
 });

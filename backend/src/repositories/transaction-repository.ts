@@ -5,6 +5,7 @@ import { HouseholdMemberEntity } from '../database/entities/household-member.ent
 import { TransactionEntity } from '../database/entities/transaction.entity.js';
 import { ForbiddenError } from '../errors/forbidden-error.js';
 import { InvalidCategoryError } from '../errors/invalid-category-error.js';
+import { TransactionNotFoundError } from '../errors/transaction-not-found-error.js';
 
 export type TransactionType = 'income' | 'expense';
 export type TransactionStatus = 'pending' | 'paid';
@@ -57,9 +58,23 @@ export interface ListTransactionsResult {
   total: number;
 }
 
+export interface UpdateTransactionData {
+  householdId: string;
+  requesterId: string;
+  transactionId: string;
+  type?: TransactionType;
+  amount?: string;
+  transactionDate?: string;
+  dueDate?: string | null;
+  categoryId?: string | null;
+  description?: string | null;
+  status?: TransactionStatus;
+}
+
 export interface TransactionRepository {
   createAsMember(data: CreateTransactionData): Promise<TransactionRecord>;
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
+  updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
 }
 
 interface TransactionRow {
@@ -158,6 +173,122 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         createdBy: data.requesterId,
         createdAt: savedTransaction.createdAt,
         updatedAt: savedTransaction.updatedAt,
+      };
+    });
+  }
+
+  async updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord> {
+    return this.dataSource.transaction(async (manager) => {
+      const membership = await manager.findOne(HouseholdMemberEntity, {
+        select: { id: true, role: true },
+        where: {
+          household: { id: data.householdId },
+          user: { id: data.requesterId },
+        },
+        lock: { mode: 'pessimistic_read' },
+      });
+
+      if (!membership) {
+        throw new ForbiddenError();
+      }
+
+      const transaction = await manager.findOne(TransactionEntity, {
+        select: {
+          id: true,
+          type: true,
+          amount: true,
+          transactionDate: true,
+          dueDate: true,
+          description: true,
+          status: true,
+          paidAt: true,
+          source: true,
+          externalId: true,
+          createdAt: true,
+          category: { id: true, type: true },
+          createdBy: { id: true },
+        },
+        relations: { category: true, createdBy: true },
+        where: { id: data.transactionId, household: { id: data.householdId } },
+        lock: { mode: 'pessimistic_write', tables: ['transactions'] },
+      });
+
+      if (!transaction) {
+        throw new TransactionNotFoundError();
+      }
+
+      if (membership.role === 'member' && transaction.createdBy.id !== data.requesterId) {
+        throw new ForbiddenError();
+      }
+
+      const finalType = data.type ?? transaction.type;
+      const finalAmount = data.amount ?? transaction.amount;
+      const finalTransactionDate = data.transactionDate ?? transaction.transactionDate;
+      const finalDueDate = data.dueDate !== undefined ? data.dueDate : transaction.dueDate;
+      const finalDescription =
+        data.description !== undefined ? data.description : transaction.description;
+
+      let finalCategory: CategoryEntity | null;
+
+      if (data.categoryId !== undefined && data.categoryId !== null) {
+        const category = await manager.findOne(CategoryEntity, {
+          select: { id: true, type: true },
+          where: { id: data.categoryId, household: { id: data.householdId } },
+          lock: { mode: 'pessimistic_read' },
+        });
+
+        if (!category || category.type !== finalType) {
+          throw new InvalidCategoryError();
+        }
+
+        finalCategory = category;
+      } else if (data.categoryId === null) {
+        finalCategory = null;
+      } else if (transaction.category !== null && transaction.category.type !== finalType) {
+        throw new InvalidCategoryError();
+      } else {
+        finalCategory = transaction.category;
+      }
+
+      let finalStatus: TransactionStatus;
+      let finalPaidAt: Date | null;
+
+      if (data.status === undefined) {
+        finalStatus = transaction.status;
+        finalPaidAt = transaction.paidAt;
+      } else if (data.status === 'paid') {
+        finalStatus = 'paid';
+        finalPaidAt = transaction.status === 'paid' ? transaction.paidAt : new Date();
+      } else {
+        finalStatus = 'pending';
+        finalPaidAt = null;
+      }
+
+      transaction.type = finalType;
+      transaction.amount = finalAmount;
+      transaction.transactionDate = finalTransactionDate;
+      transaction.dueDate = finalDueDate;
+      transaction.description = finalDescription;
+      transaction.status = finalStatus;
+      transaction.paidAt = finalPaidAt;
+      transaction.category = finalCategory;
+
+      const saved = await manager.save(transaction);
+
+      return {
+        id: saved.id,
+        type: saved.type,
+        amount: saved.amount,
+        transactionDate: saved.transactionDate,
+        dueDate: saved.dueDate,
+        categoryId: finalCategory?.id ?? null,
+        description: saved.description,
+        status: saved.status,
+        paidAt: saved.paidAt,
+        source: saved.source,
+        createdBy: transaction.createdBy.id,
+        createdAt: saved.createdAt,
+        updatedAt: saved.updatedAt,
       };
     });
   }

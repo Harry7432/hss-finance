@@ -3,28 +3,10 @@ import { z } from 'zod';
 
 import { UnauthorizedError } from '../errors/unauthorized-error.js';
 import type { ListTransactionsService } from '../services/list-transactions-service.js';
+import { serializeTransaction, transactionDateSchema } from './transaction-schemas.js';
 
 const householdIdSchema = z.uuid();
 
-function isValidCalendarDate(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-
-  if (!match) {
-    return false;
-  }
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-  const daysPerMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-  return (
-    year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= (daysPerMonth[month - 1] ?? 0)
-  );
-}
-
-const dateSchema = z.string().refine(isValidCalendarDate);
 const pageSchema = z
   .string()
   .regex(/^[1-9]\d*$/)
@@ -36,8 +18,8 @@ const listTransactionsQuerySchema = z.strictObject({
   status: z.enum(['pending', 'paid']).optional(),
   categoryId: z.uuid().optional(),
   createdBy: z.uuid().optional(),
-  startDate: dateSchema.optional(),
-  endDate: dateSchema.optional(),
+  startDate: transactionDateSchema.optional(),
+  endDate: transactionDateSchema.optional(),
   page: pageSchema.optional(),
   limit: limitSchema.optional(),
 });
@@ -101,21 +83,7 @@ export function listTransactionsController(service: ListTransactionsService): Re
       });
 
       response.status(200).json({
-        data: result.records.map((transaction) => ({
-          id: transaction.id,
-          type: transaction.type,
-          amount: transaction.amount,
-          transactionDate: transaction.transactionDate,
-          dueDate: transaction.dueDate,
-          categoryId: transaction.categoryId,
-          description: transaction.description,
-          status: transaction.status,
-          paidAt: transaction.paidAt?.toISOString() ?? null,
-          source: transaction.source,
-          createdBy: transaction.createdBy,
-          createdAt: transaction.createdAt.toISOString(),
-          updatedAt: transaction.updatedAt.toISOString(),
-        })),
+        data: result.records.map(serializeTransaction),
         meta: {
           page,
           limit,

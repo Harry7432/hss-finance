@@ -3,6 +3,7 @@
     "target": "ES2024",
     "lib": ["ES2024"],
     "module": "NodeNext",
+    "experimentalDecorators": true,
     "moduleResolution": "NodeNext",
     "strict": true,
     "noUncheckedIndexedAccess": true,

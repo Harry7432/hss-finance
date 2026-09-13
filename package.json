@@ -1,0 +1,41 @@
+{
+  "name": "hss-finance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Household financial management monorepo",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "backend:build": "npm run build --workspace backend",
+    "backend:lint": "npm run lint --workspace backend",
+    "backend:test": "npm test --workspace backend --",
+    "backend:typecheck": "npm run typecheck --workspace backend",
+    "docker:logs": "docker compose logs postgres",
+    "docker:status": "docker compose ps",
+    "docker:stop": "docker compose stop postgres",
+    "docker:up": "docker compose up -d postgres",
+    "frontend:build": "npm run build --workspace frontend",
+    "frontend:dev": "npm run dev --workspace frontend --",
+    "frontend:lint": "npm run lint --workspace frontend",
+    "frontend:preview": "npm run preview --workspace frontend --",
+    "frontend:test": "npm test --workspace frontend --",
+    "frontend:test:coverage": "npm run test:coverage --workspace frontend",
+    "frontend:typecheck": "npm run typecheck --workspace frontend",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": "24.x",
+    "npm": ">=10"
+  },
+  "devDependencies": {
+    "prettier": "3.9.6"
+  },
+  "allowScripts": {
+    "@parcel/watcher@2.6.0": true,
+    "esbuild@0.28.2": true,
+    "unrs-resolver@1.12.2": true
+  }
+}

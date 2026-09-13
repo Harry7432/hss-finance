@@ -30,6 +30,7 @@ pnpm-debug.log*
 *.tsbuildinfo
 
 # Caches and temporary files
+.rtk/
 .cache/
 .eslintcache
 .parcel-cache/

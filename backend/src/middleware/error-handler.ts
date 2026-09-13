@@ -1,5 +1,7 @@
 import type { ErrorRequestHandler } from 'express';
 
+import { UnauthorizedError } from '../errors/unauthorized-error.js';
+
 function isMalformedJsonError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) {
     return false;
@@ -9,6 +11,16 @@ function isMalformedJsonError(error: unknown): boolean {
 }
 
 export const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+  if (error instanceof UnauthorizedError) {
+    response.status(401).json({
+      error: {
+        code: 'UNAUTHORIZED',
+        message: error.message,
+      },
+    });
+    return;
+  }
+
   if (isMalformedJsonError(error)) {
     response.status(400).json({
       error: {

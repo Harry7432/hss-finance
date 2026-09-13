@@ -31,6 +31,10 @@ class InMemoryUserRepository implements UserRepository {
     return this.records.find((user) => user.email === email) ?? null;
   }
 
+  async findById(id: string): Promise<UserEntity | null> {
+    return this.records.find((user) => user.id === id) ?? null;
+  }
+
   async create(data: CreateUserData): Promise<UserEntity> {
     if (this.createError) {
       throw this.createError;

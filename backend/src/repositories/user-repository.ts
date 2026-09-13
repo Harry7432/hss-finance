@@ -15,6 +15,7 @@ export interface CreateUserData {
 export interface UserRepository {
   create(data: CreateUserData): Promise<UserEntity>;
   findByEmail(email: string): Promise<UserEntity | null>;
+  findById(id: string): Promise<UserEntity | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,6 +38,10 @@ export class TypeOrmUserRepository implements UserRepository {
 
   async findByEmail(email: string): Promise<UserEntity | null> {
     return this.repository.findOneBy({ email });
+  }
+
+  async findById(id: string): Promise<UserEntity | null> {
+    return this.repository.findOneBy({ id });
   }
 
   async create(data: CreateUserData): Promise<UserEntity> {

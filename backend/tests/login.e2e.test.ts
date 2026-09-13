@@ -37,6 +37,10 @@ class LoginUserRepository implements UserRepository {
     return this.user?.email === email ? this.user : null;
   }
 
+  async findById(id: string): Promise<UserEntity | null> {
+    return this.user?.id === id ? this.user : null;
+  }
+
   async create(_data: CreateUserData): Promise<UserEntity> {
     throw new Error('Not implemented in login tests.');
   }

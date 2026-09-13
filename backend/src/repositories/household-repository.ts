@@ -3,6 +3,11 @@ import type { DataSource } from 'typeorm';
 import { HouseholdMemberEntity } from '../database/entities/household-member.entity.js';
 import { HouseholdEntity } from '../database/entities/household.entity.js';
 import { UserEntity } from '../database/entities/user.entity.js';
+import { AlreadyHouseholdMemberError } from '../errors/already-household-member-error.js';
+import { ForbiddenError } from '../errors/forbidden-error.js';
+
+const UNIQUE_VIOLATION_CODE = '23505';
+const HOUSEHOLD_MEMBER_CONSTRAINT = 'uq_household_members_household_user';
 
 export interface CreateHouseholdData {
   name: string;
@@ -33,12 +38,32 @@ export interface ListedHouseholdMember {
   joinedAt: Date;
 }
 
+export interface AddedHouseholdMember {
+  role: 'member';
+  joinedAt: Date;
+}
+
 interface HouseholdMemberRow {
   userId: string;
   name: string;
   email: string;
   role: 'owner' | 'member';
   joinedAt: Date | string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isHouseholdMemberUniqueViolation(error: unknown): boolean {
+  if (!isRecord(error) || !isRecord(error.driverError)) {
+    return false;
+  }
+
+  return (
+    error.driverError.code === UNIQUE_VIOLATION_CODE &&
+    error.driverError.constraint === HOUSEHOLD_MEMBER_CONSTRAINT
+  );
 }
 
 export interface HouseholdRepository {
@@ -48,6 +73,12 @@ export interface HouseholdRepository {
     householdId: string,
     userId: string,
   ): Promise<ListedHouseholdMember[] | null>;
+  findMembershipRole(householdId: string, userId: string): Promise<'owner' | 'member' | null>;
+  addMemberAsOwner(
+    householdId: string,
+    requesterId: string,
+    userId: string,
+  ): Promise<AddedHouseholdMember>;
 }
 
 export class TypeOrmHouseholdRepository implements HouseholdRepository {
@@ -143,5 +174,76 @@ export class TypeOrmHouseholdRepository implements HouseholdRepository {
       role: row.role,
       joinedAt: row.joinedAt instanceof Date ? row.joinedAt : new Date(row.joinedAt),
     }));
+  }
+
+  async findMembershipRole(
+    householdId: string,
+    userId: string,
+  ): Promise<'owner' | 'member' | null> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { role: true },
+      where: {
+        household: { id: householdId },
+        user: { id: userId },
+      },
+    });
+
+    return membership?.role ?? null;
+  }
+
+  async addMemberAsOwner(
+    householdId: string,
+    requesterId: string,
+    userId: string,
+  ): Promise<AddedHouseholdMember> {
+    return this.dataSource.transaction(async (manager) => {
+      const requesterMembership = await manager.findOne(HouseholdMemberEntity, {
+        select: { id: true, role: true },
+        where: {
+          household: { id: householdId },
+          user: { id: requesterId },
+        },
+        lock: { mode: 'pessimistic_read' },
+      });
+
+      if (requesterMembership?.role !== 'owner') {
+        throw new ForbiddenError();
+      }
+
+      const repository = manager.getRepository(HouseholdMemberEntity);
+      const alreadyMember = await repository.existsBy({
+        household: { id: householdId },
+        user: { id: userId },
+      });
+
+      if (alreadyMember) {
+        throw new AlreadyHouseholdMemberError();
+      }
+
+      const membership = repository.create({
+        household: { id: householdId },
+        user: { id: userId },
+        role: 'member',
+      });
+
+      try {
+        const savedMembership = await repository.save(membership);
+
+        if (savedMembership.role !== 'member') {
+          throw new Error('The household member could not be created.');
+        }
+
+        return {
+          role: savedMembership.role,
+          joinedAt: savedMembership.joinedAt,
+        };
+      } catch (error: unknown) {
+        if (isHouseholdMemberUniqueViolation(error)) {
+          throw new AlreadyHouseholdMemberError();
+        }
+
+        throw error;
+      }
+    });
   }
 }

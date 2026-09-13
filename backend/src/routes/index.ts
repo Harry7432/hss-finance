@@ -17,7 +17,7 @@ export function createApiRouter(
 
   apiRouter.use('/auth', createAuthRouter(users, jwtSecret));
   apiRouter.use('/health', createHealthRouter(database));
-  apiRouter.use('/households', createHouseholdRouter(households, jwtSecret));
+  apiRouter.use('/households', createHouseholdRouter(households, users, jwtSecret));
 
   return apiRouter;
 }

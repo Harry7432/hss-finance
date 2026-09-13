@@ -2,14 +2,17 @@ import { randomUUID } from 'node:crypto';
 
 import { SignJWT } from 'jose';
 import request from 'supertest';
-import type { DataSource, EntityManager } from 'typeorm';
+import { QueryFailedError, type DataSource, type EntityManager, type Repository } from 'typeorm';
 
 import { createApp } from '../src/app.js';
 import type { DatabaseReadiness } from '../src/database/database-readiness.js';
 import { HouseholdMemberEntity } from '../src/database/entities/household-member.entity.js';
 import { HouseholdEntity } from '../src/database/entities/household.entity.js';
 import { UserEntity } from '../src/database/entities/user.entity.js';
+import { AlreadyHouseholdMemberError } from '../src/errors/already-household-member-error.js';
+import { ForbiddenError } from '../src/errors/forbidden-error.js';
 import type {
+  AddedHouseholdMember,
   CreatedHousehold,
   CreateHouseholdData,
   HouseholdRepository,
@@ -47,8 +50,10 @@ interface StoredMembership {
 }
 
 class StubUserRepository implements UserRepository {
-  async findByEmail(_email: string): Promise<UserEntity | null> {
-    return null;
+  constructor(readonly records: UserEntity[] = []) {}
+
+  async findByEmail(email: string): Promise<UserEntity | null> {
+    return this.records.find((user) => user.email === email) ?? null;
   }
 
   async findById(_id: string): Promise<UserEntity | null> {
@@ -69,6 +74,7 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
     private readonly membershipError?: Error,
     private readonly listError?: Error,
     private readonly memberListError?: Error,
+    private readonly addMemberError?: Error,
   ) {}
 
   async createWithOwner(data: CreateHouseholdData): Promise<CreatedHousehold | null> {
@@ -170,6 +176,46 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
           left.userId.localeCompare(right.userId),
       );
   }
+
+  async findMembershipRole(
+    householdId: string,
+    userId: string,
+  ): Promise<'owner' | 'member' | null> {
+    return (
+      this.memberships.find(
+        (membership) => membership.householdId === householdId && membership.userId === userId,
+      )?.role ?? null
+    );
+  }
+
+  async addMemberAsOwner(
+    householdId: string,
+    requesterId: string,
+    userId: string,
+  ): Promise<AddedHouseholdMember> {
+    if (this.addMemberError) {
+      throw this.addMemberError;
+    }
+
+    const requesterRole = await this.findMembershipRole(householdId, requesterId);
+
+    if (requesterRole !== 'owner') {
+      throw new ForbiddenError();
+    }
+
+    if (
+      this.memberships.some(
+        (membership) => membership.householdId === householdId && membership.userId === userId,
+      )
+    ) {
+      throw new AlreadyHouseholdMemberError();
+    }
+
+    const joinedAt = new Date('2026-09-13T16:00:00.000Z');
+    this.memberships.push({ householdId, userId, role: 'member', joinedAt });
+
+    return { role: 'member', joinedAt };
+  }
 }
 
 async function createToken(userId: string): Promise<string> {
@@ -181,8 +227,11 @@ async function createToken(userId: string): Promise<string> {
     .sign(TEST_JWT_SECRET);
 }
 
-function createTestApp(households: HouseholdRepository) {
-  return createApp(database, new StubUserRepository(), TEST_JWT_SECRET, households);
+function createTestApp(
+  households: HouseholdRepository,
+  users: UserRepository = new StubUserRepository(),
+) {
+  return createApp(database, users, TEST_JWT_SECRET, households);
 }
 
 describe('POST /api/households', () => {
@@ -967,6 +1016,308 @@ describe('GET /api/households/:householdId/members', () => {
   });
 });
 
+describe('POST /api/households/:householdId/members', () => {
+  const HOUSEHOLD_ID = randomUUID();
+  const OTHER_HOUSEHOLD_ID = randomUUID();
+  const TARGET_USER_ID = randomUUID();
+
+  function createTargetUser(id: string = TARGET_USER_ID, email = 'membro@example.com'): UserEntity {
+    return Object.assign(new UserEntity(), {
+      id,
+      name: id === AUTHENTICATED_USER_ID ? 'Harry Sousa' : 'Novo Membro',
+      email,
+      passwordHash: 'must-not-leak',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  function grantRole(
+    households: InMemoryHouseholdRepository,
+    householdId: string,
+    userId: string,
+    role: 'owner' | 'member',
+  ): void {
+    households.memberships.push({ householdId, userId, role });
+  }
+
+  it('allows an owner to add an existing user as member with normalized public data', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    const users = new StubUserRepository([createTargetUser()]);
+    const app = createTestApp(households, users);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: '  MEMBRO@EXAMPLE.COM  ' });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      data: {
+        userId: TARGET_USER_ID,
+        name: 'Novo Membro',
+        email: 'membro@example.com',
+        role: 'member',
+        joinedAt: '2026-09-13T16:00:00.000Z',
+      },
+    });
+    expect(households.memberships).toContainEqual({
+      householdId: HOUSEHOLD_ID,
+      userId: TARGET_USER_ID,
+      role: 'member',
+      joinedAt: new Date('2026-09-13T16:00:00.000Z'),
+    });
+    expect(JSON.stringify(response.body)).not.toContain('passwordHash');
+    expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
+  });
+
+  it('returns 403 when a member tries to add another user', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'member');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('returns 403 when the requester has no membership', async () => {
+    const app = createTestApp(
+      new InMemoryHouseholdRepository(),
+      new StubUserRepository([createTargetUser()]),
+    );
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('returns the same 403 for a nonexistent household', async () => {
+    const app = createTestApp(
+      new InMemoryHouseholdRepository(),
+      new StubUserRepository([createTargetUser()]),
+    );
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${randomUUID()}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('does not grant owner permission from created_by alone', async () => {
+    const households = new InMemoryHouseholdRepository();
+    households.households.push({
+      id: HOUSEHOLD_ID,
+      name: 'Casa Sousa',
+      currencyCode: 'BRL',
+      createdBy: AUTHENTICATED_USER_ID,
+      createdAt: new Date(),
+    });
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('returns 404 when the target user is not registered', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'missing@example.com' });
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({
+      error: { code: 'USER_NOT_FOUND', message: 'User not found' },
+    });
+  });
+
+  it('returns 409 when the target user is already a household member', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    grantRole(households, HOUSEHOLD_ID, TARGET_USER_ID, 'member');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      error: {
+        code: 'ALREADY_HOUSEHOLD_MEMBER',
+        message: 'User is already a household member',
+      },
+    });
+  });
+
+  it('returns 409 when an owner tries to add their own email', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    const owner = createTargetUser(AUTHENTICATED_USER_ID, 'harry@example.com');
+    const app = createTestApp(households, new StubUserRepository([owner]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'harry@example.com' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('ALREADY_HOUSEHOLD_MEMBER');
+  });
+
+  it.each([
+    ['an invalid email', HOUSEHOLD_ID, { email: 'invalid-email' }],
+    ['an unknown field', HOUSEHOLD_ID, { email: 'membro@example.com', unknown: true }],
+    ['a role field', HOUSEHOLD_ID, { email: 'membro@example.com', role: 'owner' }],
+    ['a userId field', HOUSEHOLD_ID, { email: 'membro@example.com', userId: TARGET_USER_ID }],
+    [
+      'a householdId field',
+      HOUSEHOLD_ID,
+      { email: 'membro@example.com', householdId: randomUUID() },
+    ],
+  ])('returns 400 for %s', async (_caseName, householdId, payload) => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${householdId}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(payload);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 400 for an invalid householdId', async () => {
+    const app = createTestApp(new InMemoryHouseholdRepository());
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post('/api/households/not-a-uuid/members')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('returns 401 without an access token', async () => {
+    const app = createTestApp(new InMemoryHouseholdRepository());
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('returns 401 for an invalid access token', async () => {
+    const app = createTestApp(new InMemoryHouseholdRepository());
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', 'Bearer invalid-token')
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+  });
+
+  it('does not allow query parameters to override the requester identity', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'member');
+    grantRole(households, HOUSEHOLD_ID, OTHER_USER_ID, 'owner');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members?requesterId=${OTHER_USER_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('FORBIDDEN');
+    expect(households.memberships).toHaveLength(2);
+  });
+
+  it('returns a sanitized 500 for an unexpected persistence error', async () => {
+    const households = new InMemoryHouseholdRepository(
+      AUTHENTICATED_USER_ID,
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive persistence details'),
+    );
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive persistence details');
+  });
+
+  it('does not allow an owner of household A to add members to household B', async () => {
+    const households = new InMemoryHouseholdRepository();
+    grantRole(households, HOUSEHOLD_ID, AUTHENTICATED_USER_ID, 'owner');
+    grantRole(households, OTHER_HOUSEHOLD_ID, OTHER_USER_ID, 'owner');
+    const app = createTestApp(households, new StubUserRepository([createTargetUser()]));
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${OTHER_HOUSEHOLD_ID}/members`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'membro@example.com' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('FORBIDDEN');
+  });
+});
+
 describe('TypeOrmHouseholdRepository', () => {
   it('runs household and owner creation in one transaction that rejects on membership failure', async () => {
     const creator = Object.assign(new UserEntity(), { id: AUTHENTICATED_USER_ID });
@@ -1203,5 +1554,124 @@ describe('TypeOrmHouseholdRepository', () => {
         joinedAt: new Date('2026-09-13T10:00:00.000Z'),
       },
     ]);
+  });
+
+  it('converts the membership UNIQUE constraint race into AlreadyHouseholdMemberError', async () => {
+    const driverError = Object.assign(new Error('duplicate key value'), {
+      code: '23505',
+      constraint: 'uq_household_members_household_user',
+    });
+    const queryError = new QueryFailedError('INSERT INTO household_members', [], driverError);
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      role: 'member',
+    });
+    const typeOrmRepository = {
+      async existsBy(): Promise<boolean> {
+        return false;
+      },
+      create(): HouseholdMemberEntity {
+        return membership;
+      },
+      async save(): Promise<HouseholdMemberEntity> {
+        throw queryError;
+      },
+    } as unknown as Repository<HouseholdMemberEntity>;
+    let authorizationOptions: unknown;
+    const manager = {
+      async findOne(_entity: unknown, options: unknown): Promise<HouseholdMemberEntity> {
+        authorizationOptions = options;
+        return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), role: 'owner' });
+      },
+      getRepository(): Repository<HouseholdMemberEntity> {
+        return typeOrmRepository;
+      },
+    } as unknown as EntityManager;
+    const transactionalDataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const transactionalRepository = new TypeOrmHouseholdRepository(transactionalDataSource);
+    const householdId = randomUUID();
+    const requesterId = randomUUID();
+
+    await expect(
+      transactionalRepository.addMemberAsOwner(householdId, requesterId, randomUUID()),
+    ).rejects.toBeInstanceOf(AlreadyHouseholdMemberError);
+    expect(authorizationOptions).toMatchObject({
+      select: { id: true, role: true },
+      where: {
+        household: { id: householdId },
+        user: { id: requesterId },
+      },
+      lock: { mode: 'pessimistic_read' },
+    });
+  });
+
+  it('does not mask a different 23505 constraint as an existing membership', async () => {
+    const driverError = Object.assign(new Error('duplicate key value'), {
+      code: '23505',
+      constraint: 'uq_other_constraint',
+    });
+    const queryError = new QueryFailedError('INSERT INTO household_members', [], driverError);
+    const typeOrmRepository = {
+      async existsBy(): Promise<boolean> {
+        return false;
+      },
+      create(): HouseholdMemberEntity {
+        return Object.assign(new HouseholdMemberEntity(), { role: 'member' });
+      },
+      async save(): Promise<HouseholdMemberEntity> {
+        throw queryError;
+      },
+    } as unknown as Repository<HouseholdMemberEntity>;
+    const manager = {
+      async findOne(): Promise<HouseholdMemberEntity> {
+        return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), role: 'owner' });
+      },
+      getRepository(): Repository<HouseholdMemberEntity> {
+        return typeOrmRepository;
+      },
+    } as unknown as EntityManager;
+    const transactionalDataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const transactionalRepository = new TypeOrmHouseholdRepository(transactionalDataSource);
+
+    await expect(
+      transactionalRepository.addMemberAsOwner(randomUUID(), randomUUID(), randomUUID()),
+    ).rejects.toBe(queryError);
+  });
+
+  it('rejects the insert when the requester is no longer owner at the transactional recheck', async () => {
+    let repositoryRequested = false;
+    const manager = {
+      async findOne(): Promise<HouseholdMemberEntity> {
+        return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), role: 'member' });
+      },
+      getRepository(): Repository<HouseholdMemberEntity> {
+        repositoryRequested = true;
+        throw new Error('The insert repository must not be requested.');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmHouseholdRepository(dataSource);
+
+    await expect(
+      repository.addMemberAsOwner(randomUUID(), randomUUID(), randomUUID()),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(repositoryRequested).toBe(false);
   });
 });

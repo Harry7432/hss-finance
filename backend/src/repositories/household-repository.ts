@@ -1,5 +1,6 @@
 import type { DataSource } from 'typeorm';
 
+import { CategoryEntity } from '../database/entities/category.entity.js';
 import { HouseholdMemberEntity } from '../database/entities/household-member.entity.js';
 import { HouseholdEntity } from '../database/entities/household.entity.js';
 import { UserEntity } from '../database/entities/user.entity.js';
@@ -8,6 +9,23 @@ import { ForbiddenError } from '../errors/forbidden-error.js';
 
 const UNIQUE_VIOLATION_CODE = '23505';
 const HOUSEHOLD_MEMBER_CONSTRAINT = 'uq_household_members_household_user';
+const DEFAULT_CATEGORIES = [
+  { name: 'Alimentação', type: 'expense' },
+  { name: 'Moradia', type: 'expense' },
+  { name: 'Transporte', type: 'expense' },
+  { name: 'Saúde', type: 'expense' },
+  { name: 'Educação', type: 'expense' },
+  { name: 'Lazer', type: 'expense' },
+  { name: 'Assinaturas', type: 'expense' },
+  { name: 'Contas da casa', type: 'expense' },
+  { name: 'Compras', type: 'expense' },
+  { name: 'Outros', type: 'expense' },
+  { name: 'Salário', type: 'income' },
+  { name: 'Freelance', type: 'income' },
+  { name: 'Investimentos', type: 'income' },
+  { name: 'Benefícios', type: 'income' },
+  { name: 'Outros', type: 'income' },
+] as const;
 
 export interface CreateHouseholdData {
   name: string;
@@ -108,6 +126,19 @@ export class TypeOrmHouseholdRepository implements HouseholdRepository {
       if (savedMembership.role !== 'owner') {
         throw new Error('The household owner membership could not be created.');
       }
+
+      const defaultCategories = manager.create(
+        CategoryEntity,
+        DEFAULT_CATEGORIES.map((category) => ({
+          household: savedHousehold,
+          name: category.name,
+          type: category.type,
+          color: null,
+          icon: null,
+          isDefault: true,
+        })),
+      );
+      await manager.save(defaultCategories);
 
       return {
         id: savedHousehold.id,

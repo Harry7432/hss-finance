@@ -6,6 +6,7 @@ import { QueryFailedError, type DataSource, type EntityManager, type Repository 
 
 import { createApp } from '../src/app.js';
 import type { DatabaseReadiness } from '../src/database/database-readiness.js';
+import { CategoryEntity } from '../src/database/entities/category.entity.js';
 import { HouseholdMemberEntity } from '../src/database/entities/household-member.entity.js';
 import { HouseholdEntity } from '../src/database/entities/household.entity.js';
 import { UserEntity } from '../src/database/entities/user.entity.js';
@@ -25,6 +26,25 @@ import type { CreateUserData, UserRepository } from '../src/repositories/user-re
 const TEST_JWT_SECRET = Buffer.alloc(32, 1);
 const AUTHENTICATED_USER_ID = randomUUID();
 const OTHER_USER_ID = randomUUID();
+const EXPECTED_EXPENSE_CATEGORY_NAMES = [
+  'Alimentação',
+  'Moradia',
+  'Transporte',
+  'Saúde',
+  'Educação',
+  'Lazer',
+  'Assinaturas',
+  'Contas da casa',
+  'Compras',
+  'Outros',
+];
+const EXPECTED_INCOME_CATEGORY_NAMES = [
+  'Salário',
+  'Freelance',
+  'Investimentos',
+  'Benefícios',
+  'Outros',
+];
 const database: DatabaseReadiness = {
   async isReady(): Promise<boolean> {
     return true;
@@ -49,6 +69,15 @@ interface StoredMembership {
   passwordHash?: string;
 }
 
+interface StoredCategory {
+  householdId: string;
+  name: string;
+  type: 'income' | 'expense';
+  color: null;
+  icon: null;
+  isDefault: true;
+}
+
 class StubUserRepository implements UserRepository {
   constructor(readonly records: UserEntity[] = []) {}
 
@@ -68,6 +97,7 @@ class StubUserRepository implements UserRepository {
 class InMemoryHouseholdRepository implements HouseholdRepository {
   readonly households: StoredHousehold[] = [];
   readonly memberships: StoredMembership[] = [];
+  readonly categories: StoredCategory[] = [];
 
   constructor(
     private readonly existingUserId: string | null = AUTHENTICATED_USER_ID,
@@ -75,6 +105,7 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
     private readonly listError?: Error,
     private readonly memberListError?: Error,
     private readonly addMemberError?: Error,
+    private readonly categoryError?: Error,
   ) {}
 
   async createWithOwner(data: CreateHouseholdData): Promise<CreatedHousehold | null> {
@@ -94,12 +125,36 @@ class InMemoryHouseholdRepository implements HouseholdRepository {
       throw this.membershipError;
     }
 
+    const defaultCategories: StoredCategory[] = [
+      ...EXPECTED_EXPENSE_CATEGORY_NAMES.map((name) => ({
+        householdId: household.id,
+        name,
+        type: 'expense' as const,
+        color: null,
+        icon: null,
+        isDefault: true as const,
+      })),
+      ...EXPECTED_INCOME_CATEGORY_NAMES.map((name) => ({
+        householdId: household.id,
+        name,
+        type: 'income' as const,
+        color: null,
+        icon: null,
+        isDefault: true as const,
+      })),
+    ];
+
+    if (this.categoryError) {
+      throw this.categoryError;
+    }
+
     this.households.push(household);
     this.memberships.push({
       householdId: household.id,
       userId: data.creatorId,
       role: 'owner',
     });
+    this.categories.push(...defaultCategories);
 
     return {
       id: household.id,
@@ -271,6 +326,33 @@ describe('POST /api/households', () => {
         role: 'owner',
       },
     ]);
+    expect(households.categories).toHaveLength(15);
+    expect(households.categories.filter((category) => category.type === 'expense')).toHaveLength(
+      10,
+    );
+    expect(households.categories.filter((category) => category.type === 'income')).toHaveLength(5);
+    expect(
+      households.categories
+        .filter((category) => category.type === 'expense')
+        .map((category) => category.name),
+    ).toEqual(EXPECTED_EXPENSE_CATEGORY_NAMES);
+    expect(
+      households.categories
+        .filter((category) => category.type === 'income')
+        .map((category) => category.name),
+    ).toEqual(EXPECTED_INCOME_CATEGORY_NAMES);
+    expect(households.categories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'Outros', type: 'expense' }),
+        expect.objectContaining({ name: 'Outros', type: 'income' }),
+      ]),
+    );
+    expect(households.categories.every((category) => category.isDefault)).toBe(true);
+    expect(households.categories.every((category) => category.color === null)).toBe(true);
+    expect(households.categories.every((category) => category.icon === null)).toBe(true);
+    expect(
+      households.categories.every((category) => category.householdId === response.body.data.id),
+    ).toBe(true);
     expect(response.body.data).not.toHaveProperty('createdBy');
   });
 
@@ -393,6 +475,37 @@ describe('POST /api/households', () => {
     expect(JSON.stringify(response.body)).not.toContain('membership database details');
     expect(households.households).toHaveLength(0);
     expect(households.memberships).toHaveLength(0);
+    expect(households.categories).toHaveLength(0);
+  });
+
+  it('rolls back household, owner and partial defaults when category creation fails', async () => {
+    const households = new InMemoryHouseholdRepository(
+      AUTHENTICATED_USER_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error('default category database details'),
+    );
+    const app = createTestApp(households);
+    const token = await createToken(AUTHENTICATED_USER_ID);
+
+    const response = await request(app)
+      .post('/api/households')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'Casa Sousa' });
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'Internal server error',
+      },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('default category database details');
+    expect(households.households).toHaveLength(0);
+    expect(households.memberships).toHaveLength(0);
+    expect(households.categories).toHaveLength(0);
   });
 });
 
@@ -1365,6 +1478,118 @@ describe('TypeOrmHouseholdRepository', () => {
     ).rejects.toThrow('membership failed');
     expect(transactionCalls).toBe(1);
     expect(saveCalls).toBe(2);
+  });
+
+  it('creates household, owner and all default categories in one transaction with one batch save', async () => {
+    const creator = Object.assign(new UserEntity(), { id: AUTHENTICATED_USER_ID });
+    const saveInputs: unknown[] = [];
+    let transactionCalls = 0;
+    const manager = {
+      async findOneBy(): Promise<UserEntity> {
+        return creator;
+      },
+      create(entity: unknown, data: object | object[]): object | object[] {
+        if (Array.isArray(data)) {
+          return data.map((item) => Object.assign(new CategoryEntity(), item));
+        }
+
+        if (entity === HouseholdEntity) {
+          return Object.assign(new HouseholdEntity(), data);
+        }
+
+        return Object.assign(new HouseholdMemberEntity(), data);
+      },
+      async save(entity: object | object[]): Promise<object | object[]> {
+        saveInputs.push(entity);
+
+        if (entity instanceof HouseholdEntity) {
+          return Object.assign(entity, {
+            id: randomUUID(),
+            createdAt: new Date('2026-09-13T15:00:00.000Z'),
+          });
+        }
+
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        transactionCalls += 1;
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmHouseholdRepository(dataSource);
+
+    const result = await repository.createWithOwner({
+      name: 'Casa Sousa',
+      creatorId: AUTHENTICATED_USER_ID,
+    });
+
+    expect(result).toMatchObject({ currencyCode: 'BRL', role: 'owner' });
+    expect(transactionCalls).toBe(1);
+    expect(saveInputs).toHaveLength(3);
+    expect(saveInputs[0]).toBeInstanceOf(HouseholdEntity);
+    expect(saveInputs[1]).toBeInstanceOf(HouseholdMemberEntity);
+    expect(saveInputs[2]).toEqual(expect.any(Array));
+    const categories = saveInputs[2] as CategoryEntity[];
+    expect(categories).toHaveLength(15);
+    expect(categories.filter((category) => category.type === 'expense')).toHaveLength(10);
+    expect(categories.filter((category) => category.type === 'income')).toHaveLength(5);
+    expect(categories.every((category) => category.isDefault)).toBe(true);
+    expect(categories.every((category) => category.color === null)).toBe(true);
+    expect(categories.every((category) => category.icon === null)).toBe(true);
+  });
+
+  it('rejects the same transaction when the default category batch save fails', async () => {
+    const creator = Object.assign(new UserEntity(), { id: AUTHENTICATED_USER_ID });
+    let transactionCalls = 0;
+    let saveCalls = 0;
+    const manager = {
+      async findOneBy(): Promise<UserEntity> {
+        return creator;
+      },
+      create(entity: unknown, data: object | object[]): object | object[] {
+        if (Array.isArray(data)) {
+          return data.map((item) => Object.assign(new CategoryEntity(), item));
+        }
+
+        if (entity === HouseholdEntity) {
+          return Object.assign(new HouseholdEntity(), data);
+        }
+
+        return Object.assign(new HouseholdMemberEntity(), data);
+      },
+      async save(entity: object | object[]): Promise<object | object[]> {
+        saveCalls += 1;
+
+        if (Array.isArray(entity)) {
+          throw new Error('default category batch failed');
+        }
+
+        if (entity instanceof HouseholdEntity) {
+          return Object.assign(entity, { id: randomUUID(), createdAt: new Date() });
+        }
+
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        transactionCalls += 1;
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmHouseholdRepository(dataSource);
+
+    await expect(
+      repository.createWithOwner({ name: 'Casa Sousa', creatorId: AUTHENTICATED_USER_ID }),
+    ).rejects.toThrow('default category batch failed');
+    expect(transactionCalls).toBe(1);
+    expect(saveCalls).toBe(3);
   });
 
   it('lists member households with a single joined query', async () => {

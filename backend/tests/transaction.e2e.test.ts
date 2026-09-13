@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { jest } from '@jest/globals';
 import { SignJWT } from 'jose';
 import request from 'supertest';
 import type { DataSource, EntityManager } from 'typeorm';
@@ -29,6 +30,8 @@ import type {
 import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
+  type ListTransactionsData,
+  type ListTransactionsResult,
   type TransactionRecord,
   type TransactionRepository,
 } from '../src/repositories/transaction-repository.js';
@@ -128,6 +131,7 @@ class StubCategoryRepository implements CategoryRepository {
 class InMemoryTransactionRepository implements TransactionRepository {
   readonly records: StoredTransaction[] = [];
   readonly createCalls: CreateTransactionData[] = [];
+  readonly listCalls: ListTransactionsData[] = [];
   readonly memberships: Array<{
     householdId: string;
     userId: string;
@@ -143,7 +147,10 @@ class InMemoryTransactionRepository implements TransactionRepository {
     },
   ];
 
-  constructor(private readonly createError?: Error) {}
+  constructor(
+    private readonly createError?: Error,
+    private readonly listError?: Error,
+  ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
     this.createCalls.push(data);
@@ -192,6 +199,44 @@ class InMemoryTransactionRepository implements TransactionRepository {
     this.records.push(record);
     return record;
   }
+
+  async listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult> {
+    this.listCalls.push(data);
+
+    if (this.listError) {
+      throw this.listError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const filtered = this.records
+      .filter((record) => record.householdId === data.householdId)
+      .filter((record) => data.type === undefined || record.type === data.type)
+      .filter((record) => data.status === undefined || record.status === data.status)
+      .filter((record) => data.categoryId === undefined || record.categoryId === data.categoryId)
+      .filter((record) => data.createdBy === undefined || record.createdBy === data.createdBy)
+      .filter((record) => data.startDate === undefined || record.transactionDate >= data.startDate)
+      .filter((record) => data.endDate === undefined || record.transactionDate <= data.endDate)
+      .sort(
+        (left, right) =>
+          right.transactionDate.localeCompare(left.transactionDate) ||
+          right.createdAt.getTime() - left.createdAt.getTime() ||
+          right.id.localeCompare(left.id),
+      );
+    const offset = (data.page - 1) * data.limit;
+
+    return {
+      records: filtered.slice(offset, offset + data.limit),
+      total: filtered.length,
+    };
+  }
 }
 
 async function createToken(userId: string): Promise<string> {
@@ -234,6 +279,27 @@ function validPayload(type: 'income' | 'expense' = 'expense') {
     categoryId: type === 'expense' ? EXPENSE_CATEGORY_ID : INCOME_CATEGORY_ID,
     description: 'Mercado',
     status: 'pending',
+  };
+}
+
+function storedTransaction(overrides: Partial<StoredTransaction> = {}): StoredTransaction {
+  return {
+    id: randomUUID(),
+    householdId: HOUSEHOLD_ID,
+    type: 'expense',
+    amount: '25.00',
+    transactionDate: '2026-09-13',
+    dueDate: null,
+    categoryId: EXPENSE_CATEGORY_ID,
+    description: 'Test transaction',
+    status: 'pending',
+    paidAt: null,
+    source: 'manual',
+    externalId: null,
+    createdBy: USER_ID,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
   };
 }
 
@@ -558,6 +624,548 @@ describe('POST /api/households/:householdId/transactions', () => {
   });
 });
 
+describe('GET /api/households/:householdId/transactions', () => {
+  it.each(['owner', 'member'] as const)(
+    'allows an authenticated %s to list transactions',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role);
+      transactions.records.push(storedTransaction());
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        data: [
+          {
+            id: expect.any(String),
+            type: 'expense',
+            amount: '25.00',
+            transactionDate: '2026-09-13',
+            dueDate: null,
+            categoryId: EXPENSE_CATEGORY_ID,
+            description: 'Test transaction',
+            status: 'pending',
+            paidAt: null,
+            source: 'manual',
+            createdBy: USER_ID,
+            createdAt: NOW.toISOString(),
+            updatedAt: NOW.toISOString(),
+          },
+        ],
+        meta: { page: 1, limit: 20, total: 1, totalPages: 1 },
+      });
+      expect(response.body.data[0]).not.toHaveProperty('household');
+      expect(response.body.data[0]).not.toHaveProperty('category');
+      expect(response.body.data[0]).not.toHaveProperty('user');
+      expect(response.body.data[0]).not.toHaveProperty('externalId');
+    },
+  );
+
+  it('returns an empty page with zero total pages', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: [],
+      meta: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+  });
+
+  it.each([
+    ['a nonexistent household', randomUUID(), USER_ID, undefined],
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID, undefined],
+    ['a transaction creator without membership', HOUSEHOLD_ID, OTHER_USER_ID, USER_ID],
+  ] as const)(
+    'returns the same 403 without revealing household or membership state for %s',
+    async (_caseName, householdId, userId, createdBy) => {
+      const { app, transactions } = createTestContext();
+      transactions.records.push(storedTransaction());
+      const token = await createToken(userId);
+
+      const operation = request(app)
+        .get(`/api/households/${householdId}/transactions`)
+        .set('Authorization', `Bearer ${token}`);
+      const response =
+        createdBy === undefined ? await operation : await operation.query({ createdBy });
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: { code: 'FORBIDDEN', message: 'Access denied' },
+      });
+    },
+  );
+
+  it.each(['owner', 'member'] as const)(
+    'never returns another household records to a %s',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role);
+      const included = storedTransaction();
+      const excluded = storedTransaction({ householdId: OTHER_HOUSEHOLD_ID });
+      transactions.records.push(included, excluded);
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([included.id]);
+      expect(transactions.listCalls[0]).toMatchObject({ householdId: HOUSEHOLD_ID });
+    },
+  );
+
+  it.each([
+    ['type', 'income', { type: 'income' }],
+    ['type', 'expense', { type: 'expense' }],
+    ['status', 'pending', { status: 'pending' }],
+    ['status', 'paid', { status: 'paid', paidAt: NOW }],
+  ] as const)('filters by valid %s=%s', async (key, value, matchingOverrides) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction(matchingOverrides);
+    const other = storedTransaction(
+      key === 'type'
+        ? { type: value === 'income' ? 'expense' : 'income' }
+        : { status: value === 'paid' ? 'pending' : 'paid', paidAt: value === 'paid' ? null : NOW },
+    );
+    transactions.records.push(matching, other);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ [key]: value })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+    expect(transactions.listCalls[0]).toMatchObject({ [key]: value });
+  });
+
+  it('filters by categoryId', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction();
+    transactions.records.push(matching, storedTransaction({ categoryId: null }));
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ categoryId: EXPENSE_CATEGORY_ID })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('returns an empty list for a categoryId from another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(storedTransaction());
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ categoryId: CROSS_HOUSEHOLD_CATEGORY_ID })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: [],
+      meta: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+  });
+
+  it('filters by createdBy without treating it as the requester identity', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({ createdBy: OTHER_USER_ID });
+    transactions.records.push(matching, storedTransaction());
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ createdBy: OTHER_USER_ID })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+    expect(transactions.listCalls[0]).toMatchObject({
+      requesterId: USER_ID,
+      createdBy: OTHER_USER_ID,
+    });
+  });
+
+  it('returns an empty list for a createdBy that only has transactions in another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const externalUserId = randomUUID();
+    transactions.records.push(
+      storedTransaction(),
+      storedTransaction({ householdId: OTHER_HOUSEHOLD_ID, createdBy: externalUserId }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ createdBy: externalUserId })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: [],
+      meta: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+  });
+
+  it('applies startDate inclusively', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const boundary = storedTransaction({ transactionDate: '2026-09-01' });
+    transactions.records.push(boundary, storedTransaction({ transactionDate: '2026-08-31' }));
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ startDate: '2026-09-01' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([boundary.id]);
+  });
+
+  it('applies endDate inclusively', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const boundary = storedTransaction({ transactionDate: '2026-09-30' });
+    transactions.records.push(boundary, storedTransaction({ transactionDate: '2026-10-01' }));
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ endDate: '2026-09-30' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([boundary.id]);
+  });
+
+  it('combines every filter with AND semantics', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const matching = storedTransaction({
+      type: 'income',
+      status: 'paid',
+      categoryId: INCOME_CATEGORY_ID,
+      createdBy: OTHER_USER_ID,
+      transactionDate: '2026-09-15',
+      paidAt: NOW,
+    });
+    const base = {
+      type: 'income' as const,
+      status: 'paid' as const,
+      categoryId: INCOME_CATEGORY_ID,
+      createdBy: OTHER_USER_ID,
+      transactionDate: '2026-09-15',
+      paidAt: NOW,
+    };
+    transactions.records.push(
+      matching,
+      storedTransaction({ ...base, type: 'expense' }),
+      storedTransaction({ ...base, status: 'pending' }),
+      storedTransaction({ ...base, categoryId: EXPENSE_CATEGORY_ID }),
+      storedTransaction({ ...base, createdBy: USER_ID }),
+      storedTransaction({ ...base, transactionDate: '2026-08-31' }),
+      storedTransaction({ ...base, transactionDate: '2026-10-01' }),
+    );
+    const token = await createToken(USER_ID);
+    const filters = {
+      type: 'income',
+      status: 'paid',
+      categoryId: INCOME_CATEGORY_ID,
+      createdBy: OTHER_USER_ID,
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+    };
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query(filters)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+    expect(transactions.listCalls[0]).toMatchObject(filters);
+  });
+
+  it.each([
+    ['invalid type', { type: 'transfer' }],
+    ['invalid status', { status: 'overdue' }],
+    ['invalid categoryId UUID', { categoryId: 'invalid' }],
+    ['invalid createdBy UUID', { createdBy: 'invalid' }],
+    ['invalid startDate format', { startDate: '01-09-2026' }],
+    ['impossible startDate', { startDate: '2026-02-30' }],
+    ['year 0000 startDate', { startDate: '0000-01-01' }],
+    ['invalid endDate format', { endDate: '2026/09/30' }],
+    ['impossible endDate', { endDate: '2026-04-31' }],
+    ['year 0000 endDate', { endDate: '0000-12-31' }],
+    ['inverted date range', { startDate: '2026-10-01', endDate: '2026-09-30' }],
+  ])('returns 400 and does not list for %s', async (_caseName, query) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('uses page 1 and limit 20 by default', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(transactions.listCalls[0]).toEqual({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      page: 1,
+      limit: 20,
+    });
+  });
+
+  it('paginates after filtering and reports total before pagination', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const records = Array.from({ length: 5 }, (_, index) =>
+      storedTransaction({
+        id: `00000000-0000-4000-8000-00000000000${index}`,
+        transactionDate: `2026-09-0${index + 1}`,
+      }),
+    );
+    transactions.records.push(...records, storedTransaction({ type: 'income' }));
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ type: 'expense', page: '2', limit: '2' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      records[2]?.id,
+      records[1]?.id,
+    ]);
+    expect(response.body.meta).toEqual({ page: 2, limit: 2, total: 5, totalPages: 3 });
+  });
+
+  it('returns an empty data page while preserving matching totals', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(storedTransaction(), storedTransaction());
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ page: '3', limit: '1' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: [],
+      meta: { page: 3, limit: 1, total: 2, totalPages: 2 },
+    });
+  });
+
+  it.each(['0', '-1', '1.5', 'text', '9007199254740992'])(
+    'rejects invalid page=%s',
+    async (page) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'member');
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .query({ page })
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(400);
+      expect(transactions.listCalls).toHaveLength(0);
+    },
+  );
+
+  it.each(['0', '-1', '1.5', 'text', '101'])('rejects invalid limit=%s', async (limit) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ limit })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('rejects pagination whose offset exceeds the safe integer range', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ page: '9007199254740991', limit: '2' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('orders by transactionDate descending first', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const older = storedTransaction({
+      transactionDate: '2026-09-01',
+      createdAt: new Date('2027-01-01'),
+    });
+    const newer = storedTransaction({
+      transactionDate: '2026-09-02',
+      createdAt: new Date('2025-01-01'),
+    });
+    transactions.records.push(older, newer);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      newer.id,
+      older.id,
+    ]);
+  });
+
+  it('orders equal transaction dates by createdAt descending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const older = storedTransaction({ createdAt: new Date('2026-09-13T10:00:00.000Z') });
+    const newer = storedTransaction({ createdAt: new Date('2026-09-13T11:00:00.000Z') });
+    transactions.records.push(older, newer);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      newer.id,
+      older.id,
+    ]);
+  });
+
+  it('orders equal dates and timestamps by id descending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const lower = storedTransaction({ id: '00000000-0000-4000-8000-000000000001' });
+    const higher = storedTransaction({ id: '00000000-0000-4000-8000-000000000002' });
+    transactions.records.push(lower, higher);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      higher.id,
+      lower.id,
+    ]);
+  });
+
+  it('rejects unknown query parameters', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ householdId: OTHER_HOUSEHOLD_ID })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('returns 401 without a token', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).get(`/api/households/${HOUSEHOLD_ID}/transactions`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get('/api/households/not-a-uuid/transactions')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+    });
+    expect(transactions.listCalls).toHaveLength(0);
+  });
+
+  it('returns a sanitized 500 for an unexpected listing error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      new Error('sensitive listing database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'owner');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive listing database details');
+  });
+});
+
 describe('TypeOrmTransactionRepository', () => {
   it('checks membership and category under shared locks and forces protected insert fields', async () => {
     const membership = Object.assign(new HouseholdMemberEntity(), { id: randomUUID() });
@@ -683,5 +1291,167 @@ describe('TypeOrmTransactionRepository', () => {
       }),
     ).rejects.toBeInstanceOf(errorType);
     expect(saveCalls).toBe(0);
+  });
+
+  it('lists only after membership using scoped count and row queries with AND filters', async () => {
+    const events: string[] = [];
+    const listed = {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '25.00',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      categoryId: EXPENSE_CATEGORY_ID,
+      description: null,
+      status: 'paid',
+      paidAt: NOW,
+      source: 'manual',
+      createdBy: OTHER_USER_ID,
+      createdAt: NOW,
+      updatedAt: NOW,
+    } as const;
+    const query = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      offset: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      getCount: jest.fn(async () => {
+        events.push('count');
+        return 7;
+      }),
+      getRawMany: jest.fn(async () => {
+        events.push('rows');
+        return [listed];
+      }),
+    };
+    const membershipFindOne = jest.fn(async (options: unknown) => {
+      events.push('membership');
+      return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), options });
+    });
+    const createQueryBuilder = jest.fn(() => {
+      events.push('queryBuilder');
+      return query;
+    });
+    const transaction = jest.fn(async () => {
+      throw new Error('listAsMember must not open a transaction');
+    });
+    const getRepository = jest.fn((entity: unknown) => {
+      if (entity === HouseholdMemberEntity) {
+        return { findOne: membershipFindOne };
+      }
+
+      if (entity === TransactionEntity) {
+        return { createQueryBuilder };
+      }
+
+      throw new Error('Unexpected repository');
+    });
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+    const input: ListTransactionsData = {
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      type: 'expense',
+      status: 'paid',
+      categoryId: EXPENSE_CATEGORY_ID,
+      createdBy: OTHER_USER_ID,
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+      page: 3,
+      limit: 10,
+    };
+
+    const result = await repository.listAsMember(input);
+
+    expect(events).toEqual(['membership', 'queryBuilder', 'count', 'rows']);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(membershipFindOne).toHaveBeenCalledWith({
+      select: { id: true },
+      where: {
+        household: { id: HOUSEHOLD_ID },
+        user: { id: USER_ID },
+      },
+    });
+    expect(membershipFindOne.mock.calls[0]?.[0]).not.toHaveProperty('lock');
+    expect(createQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(createQueryBuilder).toHaveBeenCalledWith('transaction');
+    expect(query.where).toHaveBeenCalledTimes(1);
+    expect(query.where).toHaveBeenCalledWith('transaction.household_id = :householdId', {
+      householdId: HOUSEHOLD_ID,
+    });
+    expect(query.andWhere.mock.calls.slice(1)).toEqual([
+      ['transaction.type = :type', { type: 'expense' }],
+      ['transaction.status = :status', { status: 'paid' }],
+      ['transaction.category_id = :categoryId', { categoryId: EXPENSE_CATEGORY_ID }],
+      ['transaction.created_by = :createdBy', { createdBy: OTHER_USER_ID }],
+      ['transaction.transaction_date >= :startDate', { startDate: '2026-09-01' }],
+      ['transaction.transaction_date <= :endDate', { endDate: '2026-09-30' }],
+    ]);
+    expect(query.andWhere.mock.calls[0]?.[0]).toContain('FROM household_members');
+    expect(query.andWhere.mock.calls[0]?.[0]).toContain(
+      'requester_membership.household_id = transaction.household_id',
+    );
+    expect(query.andWhere.mock.calls[0]?.[1]).toEqual({ requesterId: USER_ID });
+    expect(query.select).toHaveBeenCalledWith('transaction.id', 'id');
+    expect(query.addSelect).toHaveBeenCalledTimes(12);
+    expect(getRepository).toHaveBeenCalledTimes(2);
+    expect(query.orderBy).toHaveBeenCalledWith('transaction.transaction_date', 'DESC');
+    expect(query.addOrderBy.mock.calls).toEqual([
+      ['transaction.created_at', 'DESC'],
+      ['transaction.id', 'DESC'],
+    ]);
+    expect(query.offset).toHaveBeenCalledWith(20);
+    expect(query.limit).toHaveBeenCalledWith(10);
+    expect(query.getCount).toHaveBeenCalledTimes(1);
+    expect(query.getRawMany).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      records: [
+        {
+          id: listed.id,
+          type: 'expense',
+          amount: '25.00',
+          transactionDate: '2026-09-13',
+          dueDate: null,
+          categoryId: EXPENSE_CATEGORY_ID,
+          description: null,
+          status: 'paid',
+          paidAt: NOW,
+          source: 'manual',
+          createdBy: OTHER_USER_ID,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      ],
+      total: 7,
+    });
+  });
+
+  it('does not create a transaction QueryBuilder when membership is absent', async () => {
+    const membershipFindOne = jest.fn(async () => null);
+    const createQueryBuilder = jest.fn();
+    const transaction = jest.fn();
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.listAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        page: 1,
+        limit: 20,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    expect(membershipFindOne).toHaveBeenCalledTimes(1);
+    expect(getRepository).toHaveBeenCalledTimes(1);
+    expect(createQueryBuilder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
   });
 });

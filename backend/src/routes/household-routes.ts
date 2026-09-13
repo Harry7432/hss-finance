@@ -5,23 +5,31 @@ import { createHouseholdController } from '../controllers/create-household-contr
 import { createListHouseholdMembersController } from '../controllers/list-household-members-controller.js';
 import { createListHouseholdsController } from '../controllers/list-households-controller.js';
 import { createAuthenticationMiddleware } from '../middleware/authenticate.js';
+import type { CategoryRepository } from '../repositories/category-repository.js';
 import type { HouseholdRepository } from '../repositories/household-repository.js';
 import type { UserRepository } from '../repositories/user-repository.js';
 import { AddHouseholdMemberService } from '../services/add-household-member-service.js';
 import { CreateHouseholdService } from '../services/create-household-service.js';
 import { ListHouseholdMembersService } from '../services/list-household-members-service.js';
 import { ListHouseholdsService } from '../services/list-households-service.js';
+import { createCategoryRouter } from './category-routes.js';
 
 export function createHouseholdRouter(
   households: HouseholdRepository,
   users: UserRepository,
   jwtSecret: Uint8Array,
+  categories: CategoryRepository,
 ): Router {
   const householdRouter = Router();
   const addHouseholdMember = new AddHouseholdMemberService(households, users);
   const createHousehold = new CreateHouseholdService(households);
   const listHouseholdMembers = new ListHouseholdMembersService(households);
   const listHouseholds = new ListHouseholdsService(households);
+
+  householdRouter.use(
+    '/:householdId/categories',
+    createCategoryRouter(categories, households, jwtSecret),
+  );
 
   householdRouter.post(
     '/',

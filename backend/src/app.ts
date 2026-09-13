@@ -9,6 +9,10 @@ import { appDataSource } from './database/data-source.js';
 import { UserEntity } from './database/entities/user.entity.js';
 import { errorHandler } from './middleware/error-handler.js';
 import {
+  TypeOrmCategoryRepository,
+  type CategoryRepository,
+} from './repositories/category-repository.js';
+import {
   TypeOrmHouseholdRepository,
   type HouseholdRepository,
 } from './repositories/household-repository.js';
@@ -17,6 +21,7 @@ import { createApiRouter } from './routes/index.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
+const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
 
 export function createApp(
@@ -24,13 +29,14 @@ export function createApp(
   users: UserRepository = userRepository,
   tokenSecret: Uint8Array = jwtSecret,
   households: HouseholdRepository = householdRepository,
+  categories: CategoryRepository = categoryRepository,
 ): Express {
   const app = express();
 
   app.use(helmet());
   app.use(cors({ origin: env.corsOrigin }));
   app.use(express.json());
-  app.use('/api', createApiRouter(database, users, tokenSecret, households));
+  app.use('/api', createApiRouter(database, users, tokenSecret, households, categories));
   app.use(errorHandler);
 
   return app;

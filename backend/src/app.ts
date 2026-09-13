@@ -16,12 +16,17 @@ import {
   TypeOrmHouseholdRepository,
   type HouseholdRepository,
 } from './repositories/household-repository.js';
+import {
+  TypeOrmTransactionRepository,
+  type TransactionRepository,
+} from './repositories/transaction-repository.js';
 import { TypeOrmUserRepository, type UserRepository } from './repositories/user-repository.js';
 import { createApiRouter } from './routes/index.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
 const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
+const transactionRepository = new TypeOrmTransactionRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
 
 export function createApp(
@@ -30,13 +35,17 @@ export function createApp(
   tokenSecret: Uint8Array = jwtSecret,
   households: HouseholdRepository = householdRepository,
   categories: CategoryRepository = categoryRepository,
+  transactions: TransactionRepository = transactionRepository,
 ): Express {
   const app = express();
 
   app.use(helmet());
   app.use(cors({ origin: env.corsOrigin }));
   app.use(express.json());
-  app.use('/api', createApiRouter(database, users, tokenSecret, households, categories));
+  app.use(
+    '/api',
+    createApiRouter(database, users, tokenSecret, households, categories, transactions),
+  );
   app.use(errorHandler);
 
   return app;

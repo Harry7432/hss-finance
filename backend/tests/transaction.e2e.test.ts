@@ -33,6 +33,15 @@ import type {
   ListedHousehold,
   ListedHouseholdMember,
 } from '../src/repositories/household-repository.js';
+import type {
+  CreateRecurringTransactionData,
+  GenerateRecurringTransactionsData,
+  GenerateRecurringTransactionsResult,
+  ListRecurringTransactionsData,
+  RecurringTransactionRecord,
+  RecurringTransactionRepository,
+  UpdateRecurringTransactionData,
+} from '../src/repositories/recurring-transaction-repository.js';
 import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
@@ -169,6 +178,26 @@ class StubCategoryRepository implements CategoryRepository {
   ): Promise<void> {}
 }
 
+class StubRecurringTransactionRepository implements RecurringTransactionRepository {
+  async createAsMember(_data: CreateRecurringTransactionData): Promise<RecurringTransactionRecord> {
+    throw new Error('Not implemented in transaction tests.');
+  }
+
+  async listAsMember(_data: ListRecurringTransactionsData): Promise<RecurringTransactionRecord[]> {
+    return [];
+  }
+
+  async updateAsMember(_data: UpdateRecurringTransactionData): Promise<RecurringTransactionRecord> {
+    throw new Error('Not implemented in transaction tests.');
+  }
+
+  async generateAsMember(
+    _data: GenerateRecurringTransactionsData,
+  ): Promise<GenerateRecurringTransactionsResult> {
+    return { created: 0, skipped: 0 };
+  }
+}
+
 class InMemoryTransactionRepository implements TransactionRepository {
   readonly records: StoredTransaction[] = [];
   readonly createCalls: CreateTransactionData[] = [];
@@ -242,6 +271,8 @@ class InMemoryTransactionRepository implements TransactionRepository {
       paidAt: data.paidAt,
       source: 'manual',
       expenseNature: data.expenseNature,
+      recurringTransactionId: null,
+      recurringPeriod: null,
       externalId: null,
       createdBy: data.requesterId,
       createdAt: NOW,
@@ -283,6 +314,11 @@ class InMemoryTransactionRepository implements TransactionRepository {
       .filter((record) => data.createdBy === undefined || record.createdBy === data.createdBy)
       .filter(
         (record) => data.expenseNature === undefined || record.expenseNature === data.expenseNature,
+      )
+      .filter(
+        (record) =>
+          data.recurringTransactionId === undefined ||
+          record.recurringTransactionId === data.recurringTransactionId,
       )
       .filter((record) => data.startDate === undefined || record.transactionDate >= data.startDate)
       .filter((record) => data.endDate === undefined || record.transactionDate <= data.endDate)
@@ -582,6 +618,7 @@ function createTestContext(
     new StubHouseholdRepository(),
     new StubCategoryRepository(),
     transactions,
+    new StubRecurringTransactionRepository(),
     todayProvider,
   );
 
@@ -614,6 +651,8 @@ function storedTransaction(overrides: Partial<StoredTransaction> = {}): StoredTr
     paidAt: null,
     source: 'manual',
     expenseNature: null,
+    recurringTransactionId: null,
+    recurringPeriod: null,
     externalId: null,
     createdBy: USER_ID,
     createdAt: NOW,
@@ -652,6 +691,8 @@ describe('POST /api/households/:householdId/transactions', () => {
         paidAt: null,
         source: 'manual',
         expenseNature: null,
+        recurringTransactionId: null,
+        recurringPeriod: null,
         createdBy: USER_ID,
         createdAt: NOW.toISOString(),
         updatedAt: NOW.toISOString(),
@@ -662,6 +703,8 @@ describe('POST /api/households/:householdId/transactions', () => {
       createdBy: USER_ID,
       source: 'manual',
       externalId: null,
+      recurringTransactionId: null,
+      recurringPeriod: null,
     });
     expect(response.body.data).not.toHaveProperty('household');
     expect(response.body.data).not.toHaveProperty('category');
@@ -1057,6 +1100,8 @@ describe('GET /api/households/:householdId/transactions', () => {
             paidAt: null,
             source: 'manual',
             expenseNature: null,
+            recurringTransactionId: null,
+            recurringPeriod: null,
             createdBy: USER_ID,
             createdAt: NOW.toISOString(),
             updatedAt: NOW.toISOString(),
@@ -3610,6 +3655,8 @@ describe('TypeOrmTransactionRepository', () => {
       paidAt: NOW,
       source: 'manual',
       expenseNature: null,
+      recurringTransactionId: null,
+      recurringPeriod: null,
       createdBy: OTHER_USER_ID,
       createdAt: NOW,
       updatedAt: NOW,
@@ -3702,7 +3749,7 @@ describe('TypeOrmTransactionRepository', () => {
     );
     expect(query.andWhere.mock.calls[0]?.[1]).toEqual({ requesterId: USER_ID });
     expect(query.select).toHaveBeenCalledWith('transaction.id', 'id');
-    expect(query.addSelect).toHaveBeenCalledTimes(13);
+    expect(query.addSelect).toHaveBeenCalledTimes(15);
     expect(getRepository).toHaveBeenCalledTimes(2);
     expect(query.orderBy).toHaveBeenCalledWith('transaction.transaction_date', 'DESC');
     expect(query.addOrderBy.mock.calls).toEqual([
@@ -3727,6 +3774,8 @@ describe('TypeOrmTransactionRepository', () => {
           paidAt: NOW,
           source: 'manual',
           expenseNature: null,
+          recurringTransactionId: null,
+          recurringPeriod: null,
           createdBy: OTHER_USER_ID,
           createdAt: NOW,
           updatedAt: NOW,

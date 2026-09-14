@@ -58,6 +58,8 @@ export function serializeTransaction(transaction: TransactionRecord): {
   paidAt: string | null;
   source: TransactionRecord['source'];
   expenseNature: TransactionRecord['expenseNature'];
+  recurringTransactionId: string | null;
+  recurringPeriod: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -74,6 +76,8 @@ export function serializeTransaction(transaction: TransactionRecord): {
     paidAt: transaction.paidAt?.toISOString() ?? null,
     source: transaction.source,
     expenseNature: transaction.expenseNature,
+    recurringTransactionId: transaction.recurringTransactionId,
+    recurringPeriod: transaction.recurringPeriod,
     createdBy: transaction.createdBy,
     createdAt: transaction.createdAt.toISOString(),
     updatedAt: transaction.updatedAt.toISOString(),

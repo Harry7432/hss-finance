@@ -9,6 +9,7 @@ import { createListHouseholdsController } from '../controllers/list-households-c
 import { createAuthenticationMiddleware } from '../middleware/authenticate.js';
 import type { CategoryRepository } from '../repositories/category-repository.js';
 import type { HouseholdRepository } from '../repositories/household-repository.js';
+import type { RecurringTransactionRepository } from '../repositories/recurring-transaction-repository.js';
 import type { TransactionRepository } from '../repositories/transaction-repository.js';
 import type { UserRepository } from '../repositories/user-repository.js';
 import { AddHouseholdMemberService } from '../services/add-household-member-service.js';
@@ -19,6 +20,7 @@ import { ListHouseholdMembersService } from '../services/list-household-members-
 import { ListHouseholdsService } from '../services/list-households-service.js';
 import type { TodayProvider } from '../services/list-transactions-service.js';
 import { createCategoryRouter } from './category-routes.js';
+import { createRecurringTransactionRouter } from './recurring-transaction-routes.js';
 import { createTransactionRouter } from './transaction-routes.js';
 
 export function createHouseholdRouter(
@@ -27,6 +29,7 @@ export function createHouseholdRouter(
   jwtSecret: Uint8Array,
   categories: CategoryRepository,
   transactions: TransactionRepository,
+  recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
 ): Router {
   const householdRouter = Router();
@@ -44,6 +47,10 @@ export function createHouseholdRouter(
   householdRouter.use(
     '/:householdId/transactions',
     createTransactionRouter(transactions, jwtSecret, todayProvider),
+  );
+  householdRouter.use(
+    '/:householdId/recurring-transactions',
+    createRecurringTransactionRouter(recurringTransactions, jwtSecret),
   );
 
   householdRouter.post(

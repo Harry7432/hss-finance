@@ -11,7 +11,7 @@ import { TransactionNotFoundError } from '../errors/transaction-not-found-error.
 export type TransactionType = 'income' | 'expense';
 export type TransactionStatus = 'pending' | 'paid';
 export type TransactionState = 'pending' | 'overdue';
-export type TransactionSource = 'manual' | 'bank_import';
+export type TransactionSource = 'manual' | 'bank_import' | 'recurring';
 export type TransactionExpenseNature = 'fixed' | 'variable';
 
 export interface TransactionRecord {
@@ -26,6 +26,8 @@ export interface TransactionRecord {
   paidAt: Date | null;
   source: TransactionSource;
   expenseNature: TransactionExpenseNature | null;
+  recurringTransactionId: string | null;
+  recurringPeriod: string | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -54,6 +56,7 @@ export interface ListTransactionsData {
   categoryId?: string;
   createdBy?: string;
   expenseNature?: TransactionExpenseNature;
+  recurringTransactionId?: string;
   startDate?: string;
   endDate?: string;
   page: number;
@@ -136,6 +139,8 @@ interface TransactionRow {
   paidAt: Date | null;
   source: TransactionSource;
   expenseNature: TransactionExpenseNature | null;
+  recurringTransactionId: string | null;
+  recurringPeriod: string | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -213,6 +218,8 @@ function toTransactionRecord(transaction: TransactionRow): TransactionRecord {
     paidAt: transaction.paidAt,
     source: transaction.source,
     expenseNature: transaction.expenseNature,
+    recurringTransactionId: transaction.recurringTransactionId,
+    recurringPeriod: transaction.recurringPeriod,
     createdBy: transaction.createdBy,
     createdAt: transaction.createdAt,
     updatedAt: transaction.updatedAt,
@@ -265,6 +272,8 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         externalId: null,
         description: data.description,
         expenseNature: data.expenseNature,
+        recurringTransaction: null,
+        recurringPeriod: null,
       });
       const savedTransaction = await manager.save(transaction);
 
@@ -280,6 +289,8 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         paidAt: savedTransaction.paidAt,
         source: 'manual',
         expenseNature: savedTransaction.expenseNature,
+        recurringTransactionId: null,
+        recurringPeriod: null,
         createdBy: data.requesterId,
         createdAt: savedTransaction.createdAt,
         updatedAt: savedTransaction.updatedAt,
@@ -315,11 +326,13 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
           source: true,
           externalId: true,
           expenseNature: true,
+          recurringPeriod: true,
           createdAt: true,
           category: { id: true, type: true },
           createdBy: { id: true },
+          recurringTransaction: { id: true },
         },
-        relations: { category: true, createdBy: true },
+        relations: { category: true, createdBy: true, recurringTransaction: true },
         where: { id: data.transactionId, household: { id: data.householdId } },
         lock: { mode: 'pessimistic_write', tables: ['transactions'] },
       });
@@ -413,6 +426,8 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         paidAt: saved.paidAt,
         source: saved.source,
         expenseNature: saved.expenseNature,
+        recurringTransactionId: transaction.recurringTransaction?.id ?? null,
+        recurringPeriod: saved.recurringPeriod,
         createdBy: transaction.createdBy.id,
         createdAt: saved.createdAt,
         updatedAt: saved.updatedAt,
@@ -711,6 +726,12 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       });
     }
 
+    if (data.recurringTransactionId !== undefined) {
+      query.andWhere('transaction.recurring_transaction_id = :recurringTransactionId', {
+        recurringTransactionId: data.recurringTransactionId,
+      });
+    }
+
     if (data.startDate !== undefined) {
       query.andWhere('transaction.transaction_date >= :startDate', {
         startDate: data.startDate,
@@ -734,6 +755,8 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       .addSelect('transaction.paid_at', 'paidAt')
       .addSelect('transaction.source', 'source')
       .addSelect('transaction.expense_nature', 'expenseNature')
+      .addSelect('transaction.recurring_transaction_id', 'recurringTransactionId')
+      .addSelect('transaction.recurring_period', 'recurringPeriod')
       .addSelect('transaction.created_by', 'createdBy')
       .addSelect('transaction.created_at', 'createdAt')
       .addSelect('transaction.updated_at', 'updatedAt')

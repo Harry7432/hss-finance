@@ -17,6 +17,10 @@ import {
   type HouseholdRepository,
 } from './repositories/household-repository.js';
 import {
+  TypeOrmRecurringTransactionRepository,
+  type RecurringTransactionRepository,
+} from './repositories/recurring-transaction-repository.js';
+import {
   TypeOrmTransactionRepository,
   type TransactionRepository,
 } from './repositories/transaction-repository.js';
@@ -28,6 +32,7 @@ const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(Use
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
 const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
 const transactionRepository = new TypeOrmTransactionRepository(appDataSource);
+const recurringTransactionRepository = new TypeOrmRecurringTransactionRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
 
 export function createApp(
@@ -37,6 +42,7 @@ export function createApp(
   households: HouseholdRepository = householdRepository,
   categories: CategoryRepository = categoryRepository,
   transactions: TransactionRepository = transactionRepository,
+  recurringTransactions: RecurringTransactionRepository = recurringTransactionRepository,
   todayProvider?: TodayProvider,
 ): Express {
   const app = express();
@@ -53,6 +59,7 @@ export function createApp(
       households,
       categories,
       transactions,
+      recurringTransactions,
       todayProvider,
     ),
   );

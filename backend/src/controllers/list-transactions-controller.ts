@@ -24,6 +24,7 @@ const listTransactionsQuerySchema = z.strictObject({
   categoryId: z.uuid().optional(),
   createdBy: z.uuid().optional(),
   expenseNature: transactionExpenseNatureSchema.optional(),
+  recurringTransactionId: z.uuid().optional(),
   startDate: transactionDateSchema.optional(),
   endDate: transactionDateSchema.optional(),
   page: pageSchema.optional(),
@@ -86,6 +87,9 @@ export function listTransactionsController(service: ListTransactionsService): Re
         ...(parsedQuery.data.expenseNature === undefined
           ? {}
           : { expenseNature: parsedQuery.data.expenseNature }),
+        ...(parsedQuery.data.recurringTransactionId === undefined
+          ? {}
+          : { recurringTransactionId: parsedQuery.data.recurringTransactionId }),
         ...(parsedQuery.data.startDate === undefined
           ? {}
           : { startDate: parsedQuery.data.startDate }),

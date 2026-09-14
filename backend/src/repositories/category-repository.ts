@@ -11,6 +11,7 @@ const UNIQUE_VIOLATION_CODE = '23505';
 const FOREIGN_KEY_VIOLATION_CODE = '23503';
 const CATEGORY_UNIQUE_CONSTRAINT = 'uq_categories_household_type_name';
 const TRANSACTION_CATEGORY_FOREIGN_KEY = 'fk_transactions_category';
+const RECURRING_TRANSACTION_CATEGORY_FOREIGN_KEY = 'fk_recurring_transactions_category';
 
 export type CategoryType = 'income' | 'expense';
 
@@ -178,7 +179,12 @@ export class TypeOrmCategoryRepository implements CategoryRepository {
       });
     } catch (error: unknown) {
       if (
-        hasDriverConstraint(error, FOREIGN_KEY_VIOLATION_CODE, TRANSACTION_CATEGORY_FOREIGN_KEY)
+        hasDriverConstraint(error, FOREIGN_KEY_VIOLATION_CODE, TRANSACTION_CATEGORY_FOREIGN_KEY) ||
+        hasDriverConstraint(
+          error,
+          FOREIGN_KEY_VIOLATION_CODE,
+          RECURRING_TRANSACTION_CATEGORY_FOREIGN_KEY,
+        )
       ) {
         throw new CategoryInUseError();
       }

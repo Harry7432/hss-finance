@@ -851,6 +851,7 @@ describe('TypeOrmCategoryRepository constraint handling', () => {
 
   it.each([
     ['fk_transactions_category', true],
+    ['fk_recurring_transactions_category', true],
     ['fk_other_constraint', false],
   ] as const)('maps only the expected delete FK (%s)', async (constraint, maps) => {
     const error = constraintError('23503', constraint);

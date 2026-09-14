@@ -71,10 +71,17 @@ export interface UpdateTransactionData {
   status?: TransactionStatus;
 }
 
+export interface DeleteTransactionData {
+  householdId: string;
+  requesterId: string;
+  transactionId: string;
+}
+
 export interface TransactionRepository {
   createAsMember(data: CreateTransactionData): Promise<TransactionRecord>;
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
+  deleteAsMember(data: DeleteTransactionData): Promise<void>;
 }
 
 interface TransactionRow {
@@ -290,6 +297,40 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         createdAt: saved.createdAt,
         updatedAt: saved.updatedAt,
       };
+    });
+  }
+
+  async deleteAsMember(data: DeleteTransactionData): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const membership = await manager.findOne(HouseholdMemberEntity, {
+        select: { id: true, role: true },
+        where: {
+          household: { id: data.householdId },
+          user: { id: data.requesterId },
+        },
+        lock: { mode: 'pessimistic_read' },
+      });
+
+      if (!membership) {
+        throw new ForbiddenError();
+      }
+
+      const transaction = await manager.findOne(TransactionEntity, {
+        select: { id: true, createdBy: { id: true } },
+        relations: { createdBy: true },
+        where: { id: data.transactionId, household: { id: data.householdId } },
+        lock: { mode: 'pessimistic_write', tables: ['transactions'] },
+      });
+
+      if (!transaction) {
+        throw new TransactionNotFoundError();
+      }
+
+      if (membership.role === 'member' && transaction.createdBy.id !== data.requesterId) {
+        throw new ForbiddenError();
+      }
+
+      await manager.remove(transaction);
     });
   }
 

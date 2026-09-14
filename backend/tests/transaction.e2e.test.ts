@@ -32,6 +32,7 @@ import type {
 import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
+  type DeleteTransactionData,
   type ListTransactionsData,
   type ListTransactionsResult,
   type TransactionRecord,
@@ -135,6 +136,7 @@ class StubCategoryRepository implements CategoryRepository {
 class InMemoryTransactionRepository implements TransactionRepository {
   readonly records: StoredTransaction[] = [];
   readonly createCalls: CreateTransactionData[] = [];
+  readonly deleteCalls: DeleteTransactionData[] = [];
   readonly listCalls: ListTransactionsData[] = [];
   readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
@@ -156,6 +158,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
     private readonly createError?: Error,
     private readonly listError?: Error,
     private readonly updateError?: Error,
+    private readonly deleteError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -338,6 +341,38 @@ class InMemoryTransactionRepository implements TransactionRepository {
     };
     this.records[index] = updated;
     return updated;
+  }
+
+  async deleteAsMember(data: DeleteTransactionData): Promise<void> {
+    this.deleteCalls.push(data);
+
+    if (this.deleteError) {
+      throw this.deleteError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const index = this.records.findIndex(
+      (record) => record.id === data.transactionId && record.householdId === data.householdId,
+    );
+    const transaction = this.records[index];
+
+    if (index === -1 || transaction === undefined) {
+      throw new TransactionNotFoundError();
+    }
+
+    if (membership.role === 'member' && transaction.createdBy !== data.requesterId) {
+      throw new ForbiddenError();
+    }
+
+    this.records.splice(index, 1);
   }
 }
 
@@ -1903,6 +1938,186 @@ describe('PATCH /api/households/:householdId/transactions/:transactionId', () =>
   });
 });
 
+describe('DELETE /api/households/:householdId/transactions/:transactionId', () => {
+  const removeTransaction = (
+    app: Express,
+    token: string,
+    transactionId: string,
+    householdId: string = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .delete(`/api/households/${householdId}/transactions/${transactionId}`)
+      .set('Authorization', `Bearer ${token}`);
+
+  it.each([
+    ['their own transaction', USER_ID],
+    ['a transaction created by a member', OTHER_USER_ID],
+  ] as const)(
+    'allows an owner to delete %s with an empty 204 response',
+    async (_case, createdBy) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'owner');
+      const existing = storedTransaction({ createdBy });
+      transactions.records.push(existing);
+      const token = await createToken(USER_ID);
+
+      const response = await removeTransaction(app, token, existing.id);
+
+      expect(response.status).toBe(204);
+      expect(response.text).toBe('');
+      expect(response.headers['content-type']).toBeUndefined();
+      expect(transactions.records).toHaveLength(0);
+
+      const listResponse = await request(app)
+        .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(listResponse.body.data).toEqual([]);
+    },
+  );
+
+  it('allows a member to delete their own transaction and it cannot be updated afterwards', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const deleteResponse = await removeTransaction(app, token, existing.id);
+    const updateResponse = await request(app)
+      .patch(`/api/households/${HOUSEHOLD_ID}/transactions/${existing.id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ description: 'Too late' });
+
+    expect(deleteResponse.status).toBe(204);
+    expect(updateResponse.status).toBe(404);
+    expect(updateResponse.body).toEqual({
+      error: { code: 'TRANSACTION_NOT_FOUND', message: 'Transaction not found' },
+    });
+  });
+
+  it('forbids a member from deleting another member transaction', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction({ createdBy: OTHER_USER_ID });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await removeTransaction(app, token, existing.id);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    expect(transactions.records).toEqual([existing]);
+  });
+
+  it.each([
+    ['a user without membership', HOUSEHOLD_ID, USER_ID],
+    ['a nonexistent household', OTHER_HOUSEHOLD_ID, USER_ID],
+    ['the transaction author without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+  ] as const)('returns 403 for %s', async (_case, householdId, requesterId) => {
+    const { app, transactions } = createTestContext();
+    const existing = storedTransaction({ createdBy: requesterId });
+    transactions.records.push(existing);
+    const token = await createToken(requesterId);
+
+    const response = await removeTransaction(app, token, existing.id, householdId);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { code: 'FORBIDDEN', message: 'Access denied' } });
+    expect(transactions.records).toEqual([existing]);
+  });
+
+  it.each([
+    ['a nonexistent transaction', randomUUID()],
+    [
+      'a transaction from another household',
+      storedTransaction({ householdId: OTHER_HOUSEHOLD_ID }).id,
+    ],
+  ] as const)('returns the same 404 for %s', async (caseName, transactionId) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const otherHouseholdTransaction = storedTransaction({
+      id: caseName.includes('another household') ? transactionId : randomUUID(),
+      householdId: OTHER_HOUSEHOLD_ID,
+    });
+    transactions.records.push(otherHouseholdTransaction);
+    const token = await createToken(USER_ID);
+
+    const response = await removeTransaction(app, token, transactionId);
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({
+      error: { code: 'TRANSACTION_NOT_FOUND', message: 'Transaction not found' },
+    });
+    expect(transactions.records).toEqual([otherHouseholdTransaction]);
+  });
+
+  it.each([
+    ['household', 'not-a-uuid', randomUUID()],
+    ['transaction', HOUSEHOLD_ID, 'not-a-uuid'],
+  ] as const)(
+    'returns 400 before the repository for an invalid %s UUID',
+    async (_parameter, householdId, transactionId) => {
+      const { app, transactions } = createTestContext();
+      const token = await createToken(USER_ID);
+
+      const response = await removeTransaction(app, token, transactionId, householdId);
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+      });
+      expect(transactions.deleteCalls).toHaveLength(0);
+    },
+  );
+
+  it('applies the same authorization policy to a bank import transaction', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const existing = storedTransaction({ source: 'bank_import' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await removeTransaction(app, token, existing.id);
+
+    expect(response.status).toBe(204);
+    expect(transactions.records).toHaveLength(0);
+  });
+
+  it('returns a sanitized 500 for an unexpected deletion error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive deletion database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await removeTransaction(app, token, existing.id);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive deletion database details');
+  });
+
+  it('returns 401 without authorization', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).delete(
+      `/api/households/${HOUSEHOLD_ID}/transactions/${randomUUID()}`,
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.deleteCalls).toHaveLength(0);
+  });
+});
+
 describe('TypeOrmTransactionRepository', () => {
   it('checks membership and category under shared locks and forces protected insert fields', async () => {
     const membership = Object.assign(new HouseholdMemberEntity(), { id: randomUUID() });
@@ -2572,5 +2787,139 @@ describe('TypeOrmTransactionRepository', () => {
       }),
     ).rejects.toBeInstanceOf(errorType);
     expect(saveCalls).toBe(0);
+  });
+
+  it('deletes an authorized scoped transaction with the required locks', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    const events: string[] = [];
+    const findCalls: Array<{ entity: unknown; options: unknown }> = [];
+    let transactionCalls = 0;
+    const manager = {
+      async findOne(entity: unknown, options: unknown): Promise<object | null> {
+        events.push(entity === HouseholdMemberEntity ? 'membership' : 'transaction');
+        findCalls.push({ entity, options });
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async remove(entity: TransactionEntity): Promise<TransactionEntity> {
+        events.push('remove');
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        transactionCalls += 1;
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await repository.deleteAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+    });
+
+    expect(transactionCalls).toBe(1);
+    expect(events).toEqual(['membership', 'transaction', 'remove']);
+    expect(findCalls).toHaveLength(2);
+    expect(findCalls[0]).toMatchObject({
+      entity: HouseholdMemberEntity,
+      options: {
+        select: { id: true, role: true },
+        where: { household: { id: HOUSEHOLD_ID }, user: { id: USER_ID } },
+        lock: { mode: 'pessimistic_read' },
+      },
+    });
+    expect(findCalls[1]).toEqual({
+      entity: TransactionEntity,
+      options: {
+        select: { id: true, createdBy: { id: true } },
+        relations: { createdBy: true },
+        where: { id: existing.id, household: { id: HOUSEHOLD_ID } },
+        lock: { mode: 'pessimistic_write', tables: ['transactions'] },
+      },
+    });
+    expect(findCalls.some((call) => call.entity === CategoryEntity)).toBe(false);
+  });
+
+  it('does not remove a transaction created by someone else for a member', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'member',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      createdBy: Object.assign(new UserEntity(), { id: OTHER_USER_ID }),
+    });
+    let removeCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async remove(): Promise<never> {
+        removeCalls += 1;
+        throw new Error('Unexpected remove');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.deleteAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: existing.id,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect(removeCalls).toBe(0);
+  });
+
+  it('does not remove when the scoped transaction is absent', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    let removeCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : null;
+      },
+      async remove(): Promise<never> {
+        removeCalls += 1;
+        throw new Error('Unexpected remove');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.deleteAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(TransactionNotFoundError);
+    expect(removeCalls).toBe(0);
   });
 });

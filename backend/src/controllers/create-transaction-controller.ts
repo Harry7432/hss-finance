@@ -7,21 +7,26 @@ import type { CreateTransactionService } from '../services/create-transaction-se
 import {
   amountSchema,
   descriptionSchema,
+  isExpenseNatureConsistentWithType,
   serializeTransaction,
   transactionDateSchema,
+  transactionExpenseNatureSchema,
 } from './transaction-schemas.js';
 
 const householdIdSchema = z.uuid();
 
-const createTransactionSchema = z.strictObject({
-  type: z.enum(['income', 'expense']),
-  amount: amountSchema,
-  transactionDate: transactionDateSchema,
-  dueDate: transactionDateSchema.nullable().optional(),
-  categoryId: z.uuid().nullable().optional(),
-  description: descriptionSchema,
-  status: z.enum(['pending', 'paid']).optional(),
-});
+const createTransactionSchema = z
+  .strictObject({
+    type: z.enum(['income', 'expense']),
+    amount: amountSchema,
+    transactionDate: transactionDateSchema,
+    dueDate: transactionDateSchema.nullable().optional(),
+    categoryId: z.uuid().nullable().optional(),
+    description: descriptionSchema,
+    status: z.enum(['pending', 'paid']).optional(),
+    expenseNature: transactionExpenseNatureSchema.nullable().optional(),
+  })
+  .refine(isExpenseNatureConsistentWithType);
 
 export function createTransactionController(service: CreateTransactionService): RequestHandler {
   return async (request, response, next) => {
@@ -57,6 +62,8 @@ export function createTransactionController(service: CreateTransactionService): 
         categoryId: parsedPayload.data.categoryId ?? null,
         description: parsedPayload.data.description || null,
         status: parsedPayload.data.status ?? 'pending',
+        expenseNature:
+          parsedPayload.data.type === 'expense' ? (parsedPayload.data.expenseNature ?? null) : null,
       });
 
       response.status(201).json({ data: serializeTransaction(transaction) });

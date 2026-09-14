@@ -2,14 +2,17 @@ import type { RequestHandler } from 'express';
 import { z } from 'zod';
 
 import { InvalidCategoryError } from '../errors/invalid-category-error.js';
+import { InvalidExpenseNatureError } from '../errors/invalid-expense-nature-error.js';
 import { TransactionNotFoundError } from '../errors/transaction-not-found-error.js';
 import { UnauthorizedError } from '../errors/unauthorized-error.js';
 import type { UpdateTransactionService } from '../services/update-transaction-service.js';
 import {
   amountSchema,
   descriptionSchema,
+  isExpenseNatureConsistentWithType,
   serializeTransaction,
   transactionDateSchema,
+  transactionExpenseNatureSchema,
 } from './transaction-schemas.js';
 
 const householdIdSchema = z.uuid();
@@ -24,8 +27,10 @@ const updateTransactionSchema = z
     categoryId: z.uuid().nullable().optional(),
     description: descriptionSchema,
     status: z.enum(['pending', 'paid']).optional(),
+    expenseNature: transactionExpenseNatureSchema.nullable().optional(),
   })
-  .refine((payload) => Object.keys(payload).length > 0);
+  .refine((payload) => Object.keys(payload).length > 0)
+  .refine(isExpenseNatureConsistentWithType);
 
 export function updateTransactionController(service: UpdateTransactionService): RequestHandler {
   return async (request, response, next) => {
@@ -82,6 +87,9 @@ export function updateTransactionController(service: UpdateTransactionService): 
             ? {}
             : { description: parsedPayload.data.description || null }),
           ...(parsedPayload.data.status === undefined ? {} : { status: parsedPayload.data.status }),
+          ...(parsedPayload.data.expenseNature === undefined
+            ? {}
+            : { expenseNature: parsedPayload.data.expenseNature }),
         },
       );
 
@@ -90,6 +98,13 @@ export function updateTransactionController(service: UpdateTransactionService): 
       if (error instanceof InvalidCategoryError) {
         response.status(400).json({
           error: { code: 'INVALID_CATEGORY', message: error.message },
+        });
+        return;
+      }
+
+      if (error instanceof InvalidExpenseNatureError) {
+        response.status(400).json({
+          error: { code: 'INVALID_EXPENSE_NATURE', message: error.message },
         });
         return;
       }

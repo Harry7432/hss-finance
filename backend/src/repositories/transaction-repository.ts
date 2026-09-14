@@ -5,12 +5,14 @@ import { HouseholdMemberEntity } from '../database/entities/household-member.ent
 import { TransactionEntity } from '../database/entities/transaction.entity.js';
 import { ForbiddenError } from '../errors/forbidden-error.js';
 import { InvalidCategoryError } from '../errors/invalid-category-error.js';
+import { InvalidExpenseNatureError } from '../errors/invalid-expense-nature-error.js';
 import { TransactionNotFoundError } from '../errors/transaction-not-found-error.js';
 
 export type TransactionType = 'income' | 'expense';
 export type TransactionStatus = 'pending' | 'paid';
 export type TransactionState = 'pending' | 'overdue';
 export type TransactionSource = 'manual' | 'bank_import';
+export type TransactionExpenseNature = 'fixed' | 'variable';
 
 export interface TransactionRecord {
   id: string;
@@ -23,6 +25,7 @@ export interface TransactionRecord {
   status: TransactionStatus;
   paidAt: Date | null;
   source: TransactionSource;
+  expenseNature: TransactionExpenseNature | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -39,6 +42,7 @@ export interface CreateTransactionData {
   description: string | null;
   status: TransactionStatus;
   paidAt: Date | null;
+  expenseNature: TransactionExpenseNature | null;
 }
 
 export interface ListTransactionsData {
@@ -49,6 +53,7 @@ export interface ListTransactionsData {
   state?: TransactionState;
   categoryId?: string;
   createdBy?: string;
+  expenseNature?: TransactionExpenseNature;
   startDate?: string;
   endDate?: string;
   page: number;
@@ -101,6 +106,7 @@ export interface UpdateTransactionData {
   categoryId?: string | null;
   description?: string | null;
   status?: TransactionStatus;
+  expenseNature?: TransactionExpenseNature | null;
 }
 
 export interface DeleteTransactionData {
@@ -129,6 +135,7 @@ interface TransactionRow {
   status: TransactionStatus;
   paidAt: Date | null;
   source: TransactionSource;
+  expenseNature: TransactionExpenseNature | null;
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -205,6 +212,7 @@ function toTransactionRecord(transaction: TransactionRow): TransactionRecord {
     status: transaction.status,
     paidAt: transaction.paidAt,
     source: transaction.source,
+    expenseNature: transaction.expenseNature,
     createdBy: transaction.createdBy,
     createdAt: transaction.createdAt,
     updatedAt: transaction.updatedAt,
@@ -256,6 +264,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         source: 'manual',
         externalId: null,
         description: data.description,
+        expenseNature: data.expenseNature,
       });
       const savedTransaction = await manager.save(transaction);
 
@@ -270,6 +279,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         status: savedTransaction.status,
         paidAt: savedTransaction.paidAt,
         source: 'manual',
+        expenseNature: savedTransaction.expenseNature,
         createdBy: data.requesterId,
         createdAt: savedTransaction.createdAt,
         updatedAt: savedTransaction.updatedAt,
@@ -304,6 +314,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
           paidAt: true,
           source: true,
           externalId: true,
+          expenseNature: true,
           createdAt: true,
           category: { id: true, type: true },
           createdBy: { id: true },
@@ -364,6 +375,20 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         finalPaidAt = null;
       }
 
+      let finalExpenseNature: TransactionExpenseNature | null;
+
+      if (finalType === 'income') {
+        if (data.expenseNature !== undefined && data.expenseNature !== null) {
+          throw new InvalidExpenseNatureError();
+        }
+
+        finalExpenseNature = null;
+      } else if (data.expenseNature !== undefined) {
+        finalExpenseNature = data.expenseNature;
+      } else {
+        finalExpenseNature = transaction.expenseNature;
+      }
+
       transaction.type = finalType;
       transaction.amount = finalAmount;
       transaction.transactionDate = finalTransactionDate;
@@ -372,6 +397,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       transaction.status = finalStatus;
       transaction.paidAt = finalPaidAt;
       transaction.category = finalCategory;
+      transaction.expenseNature = finalExpenseNature;
 
       const saved = await manager.save(transaction);
 
@@ -386,6 +412,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         status: saved.status,
         paidAt: saved.paidAt,
         source: saved.source,
+        expenseNature: saved.expenseNature,
         createdBy: transaction.createdBy.id,
         createdAt: saved.createdAt,
         updatedAt: saved.updatedAt,
@@ -678,6 +705,12 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       query.andWhere('transaction.created_by = :createdBy', { createdBy: data.createdBy });
     }
 
+    if (data.expenseNature !== undefined) {
+      query.andWhere('transaction.expense_nature = :expenseNature', {
+        expenseNature: data.expenseNature,
+      });
+    }
+
     if (data.startDate !== undefined) {
       query.andWhere('transaction.transaction_date >= :startDate', {
         startDate: data.startDate,
@@ -700,6 +733,7 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       .addSelect('transaction.status', 'status')
       .addSelect('transaction.paid_at', 'paidAt')
       .addSelect('transaction.source', 'source')
+      .addSelect('transaction.expense_nature', 'expenseNature')
       .addSelect('transaction.created_by', 'createdBy')
       .addSelect('transaction.created_at', 'createdAt')
       .addSelect('transaction.updated_at', 'updatedAt')

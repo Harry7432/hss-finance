@@ -1,4 +1,5 @@
 import type {
+  TransactionExpenseNature,
   TransactionRecord,
   TransactionRepository,
   TransactionStatus,
@@ -13,6 +14,7 @@ export interface UpdateTransactionInput {
   categoryId?: string | null;
   description?: string | null;
   status?: TransactionStatus;
+  expenseNature?: TransactionExpenseNature | null;
 }
 
 export class UpdateTransactionService {

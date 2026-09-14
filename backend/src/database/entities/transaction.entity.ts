@@ -20,6 +20,9 @@ import { UserEntity } from './user.entity.js';
 @Check("\"source\" IN ('manual', 'bank_import')")
 @Check('("status" = \'paid\') = ("paid_at" IS NOT NULL)')
 @Check('"description" IS NULL OR char_length("description") <= 255')
+@Check(
+  '"expense_nature" IS NULL OR ("type" = \'expense\' AND "expense_nature" IN (\'fixed\', \'variable\'))',
+)
 export class TransactionEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -62,6 +65,9 @@ export class TransactionEntity {
 
   @Column({ type: 'text', default: 'pending' })
   status!: 'pending' | 'paid';
+
+  @Column({ name: 'expense_nature', type: 'text', nullable: true })
+  expenseNature!: 'fixed' | 'variable' | null;
 
   @Column({ type: 'text', default: 'manual' })
   source!: 'manual' | 'bank_import';

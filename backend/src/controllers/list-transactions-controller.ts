@@ -3,7 +3,11 @@ import { z } from 'zod';
 
 import { UnauthorizedError } from '../errors/unauthorized-error.js';
 import type { ListTransactionsService } from '../services/list-transactions-service.js';
-import { serializeTransaction, transactionDateSchema } from './transaction-schemas.js';
+import {
+  serializeTransaction,
+  transactionDateSchema,
+  transactionExpenseNatureSchema,
+} from './transaction-schemas.js';
 
 const householdIdSchema = z.uuid();
 
@@ -19,6 +23,7 @@ const listTransactionsQuerySchema = z.strictObject({
   state: z.enum(['pending', 'overdue']).optional(),
   categoryId: z.uuid().optional(),
   createdBy: z.uuid().optional(),
+  expenseNature: transactionExpenseNatureSchema.optional(),
   startDate: transactionDateSchema.optional(),
   endDate: transactionDateSchema.optional(),
   page: pageSchema.optional(),
@@ -78,6 +83,9 @@ export function listTransactionsController(service: ListTransactionsService): Re
         ...(parsedQuery.data.createdBy === undefined
           ? {}
           : { createdBy: parsedQuery.data.createdBy }),
+        ...(parsedQuery.data.expenseNature === undefined
+          ? {}
+          : { expenseNature: parsedQuery.data.expenseNature }),
         ...(parsedQuery.data.startDate === undefined
           ? {}
           : { startDate: parsedQuery.data.startDate }),

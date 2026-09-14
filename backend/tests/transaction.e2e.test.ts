@@ -16,6 +16,7 @@ import { HouseholdMemberEntity } from '../src/database/entities/household-member
 import { TransactionEntity } from '../src/database/entities/transaction.entity.js';
 import { ForbiddenError } from '../src/errors/forbidden-error.js';
 import { InvalidCategoryError } from '../src/errors/invalid-category-error.js';
+import { InvalidExpenseNatureError } from '../src/errors/invalid-expense-nature-error.js';
 import { TransactionNotFoundError } from '../src/errors/transaction-not-found-error.js';
 import type {
   CategoryRecord,
@@ -240,6 +241,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
       status: data.status,
       paidAt: data.paidAt,
       source: 'manual',
+      expenseNature: data.expenseNature,
       externalId: null,
       createdBy: data.requesterId,
       createdAt: NOW,
@@ -279,6 +281,9 @@ class InMemoryTransactionRepository implements TransactionRepository {
       )
       .filter((record) => data.categoryId === undefined || record.categoryId === data.categoryId)
       .filter((record) => data.createdBy === undefined || record.createdBy === data.createdBy)
+      .filter(
+        (record) => data.expenseNature === undefined || record.expenseNature === data.expenseNature,
+      )
       .filter((record) => data.startDate === undefined || record.transactionDate >= data.startDate)
       .filter((record) => data.endDate === undefined || record.transactionDate <= data.endDate)
       .sort(
@@ -483,6 +488,20 @@ class InMemoryTransactionRepository implements TransactionRepository {
       finalPaidAt = null;
     }
 
+    let finalExpenseNature: TransactionRecord['expenseNature'];
+
+    if (finalType === 'income') {
+      if (data.expenseNature !== undefined && data.expenseNature !== null) {
+        throw new InvalidExpenseNatureError();
+      }
+
+      finalExpenseNature = null;
+    } else if (data.expenseNature !== undefined) {
+      finalExpenseNature = data.expenseNature;
+    } else {
+      finalExpenseNature = current.expenseNature;
+    }
+
     const updated: StoredTransaction = {
       ...current,
       type: finalType,
@@ -493,6 +512,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
       description: finalDescription,
       status: finalStatus,
       paidAt: finalPaidAt,
+      expenseNature: finalExpenseNature,
       updatedAt: new Date(),
     };
     this.records[index] = updated;
@@ -593,6 +613,7 @@ function storedTransaction(overrides: Partial<StoredTransaction> = {}): StoredTr
     status: 'pending',
     paidAt: null,
     source: 'manual',
+    expenseNature: null,
     externalId: null,
     createdBy: USER_ID,
     createdAt: NOW,
@@ -630,6 +651,7 @@ describe('POST /api/households/:householdId/transactions', () => {
         status: 'pending',
         paidAt: null,
         source: 'manual',
+        expenseNature: null,
         createdBy: USER_ID,
         createdAt: NOW.toISOString(),
         updatedAt: NOW.toISOString(),
@@ -761,6 +783,89 @@ describe('POST /api/households/:householdId/transactions', () => {
     expect(transactions.createCalls[0]?.amount).toBe(normalized);
   });
 
+  it.each(['fixed', 'variable'] as const)(
+    'creates an expense with expenseNature=%s',
+    async (expenseNature) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'member');
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .post(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...validPayload('expense'), expenseNature });
+
+      expect(response.status).toBe(201);
+      expect(response.body.data.expenseNature).toBe(expenseNature);
+      expect(transactions.createCalls[0]?.expenseNature).toBe(expenseNature);
+    },
+  );
+
+  it('creates an expense without expenseNature and defaults it to null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(validPayload('expense'));
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.expenseNature).toBeNull();
+    expect(transactions.createCalls[0]?.expenseNature).toBeNull();
+  });
+
+  it('creates an income without expenseNature and defaults it to null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(validPayload('income'));
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.expenseNature).toBeNull();
+    expect(transactions.createCalls[0]?.expenseNature).toBeNull();
+  });
+
+  it.each(['fixed', 'variable'] as const)(
+    'returns 400 when creating an income with expenseNature=%s',
+    async (expenseNature) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'owner');
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .post(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ ...validPayload('income'), expenseNature });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: { code: 'VALIDATION_ERROR', message: 'Invalid request payload' },
+      });
+      expect(transactions.createCalls).toHaveLength(0);
+      expect(transactions.records).toHaveLength(0);
+    },
+  );
+
+  it('accepts an explicit null expenseNature for an income', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .post(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ...validPayload('income'), expenseNature: null });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.expenseNature).toBeNull();
+  });
+
   it.each([
     ['a category from another household', CROSS_HOUSEHOLD_CATEGORY_ID],
     ['a nonexistent category', randomUUID()],
@@ -854,6 +959,8 @@ describe('POST /api/households/:householdId/transactions', () => {
     ['invalid due date', { ...validPayload(), dueDate: '2026-13-01' }],
     ['year zero due date', { ...validPayload(), dueDate: '0000-01-01' }],
     ['description above schema limit', { ...validPayload(), description: 'a'.repeat(256) }],
+    ['invalid expenseNature', { ...validPayload(), expenseNature: 'half' }],
+    ['numeric expenseNature', { ...validPayload(), expenseNature: 1 }],
     ['extra field', { ...validPayload(), extra: true }],
     ['source', { ...validPayload(), source: 'bank_import' }],
     ['externalId', { ...validPayload(), externalId: 'external' }],
@@ -949,6 +1056,7 @@ describe('GET /api/households/:householdId/transactions', () => {
             status: 'pending',
             paidAt: null,
             source: 'manual',
+            expenseNature: null,
             createdBy: USER_ID,
             createdAt: NOW.toISOString(),
             updatedAt: NOW.toISOString(),
@@ -1214,6 +1322,126 @@ describe('GET /api/households/:householdId/transactions', () => {
       data: [],
       meta: { page: 1, limit: 20, total: 0, totalPages: 0 },
     });
+  });
+
+  it.each(['fixed', 'variable'] as const)('filters by expenseNature=%s', async (expenseNature) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({ expenseNature });
+    const other = storedTransaction({
+      expenseNature: expenseNature === 'fixed' ? 'variable' : 'fixed',
+    });
+    const unclassified = storedTransaction({ expenseNature: null });
+    transactions.records.push(matching, other, unclassified);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ expenseNature })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+    expect(response.body.data[0].expenseNature).toBe(expenseNature);
+    expect(transactions.listCalls[0]).toMatchObject({ expenseNature });
+  });
+
+  it('does not mix expenseNature matches from another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({ expenseNature: 'fixed' });
+    const otherHousehold = storedTransaction({
+      expenseNature: 'fixed',
+      householdId: OTHER_HOUSEHOLD_ID,
+    });
+    transactions.records.push(matching, otherHousehold);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ expenseNature: 'fixed' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('combines expenseNature with type using AND semantics', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({ type: 'expense', expenseNature: 'fixed' });
+    const wrongType = storedTransaction({
+      type: 'income',
+      categoryId: INCOME_CATEGORY_ID,
+      expenseNature: null,
+    });
+    transactions.records.push(matching, wrongType);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ type: 'expense', expenseNature: 'fixed' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('combines expenseNature with categoryId using AND semantics', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({ categoryId: EXPENSE_CATEGORY_ID, expenseNature: 'fixed' });
+    const otherCategory = storedTransaction({ categoryId: null, expenseNature: 'fixed' });
+    transactions.records.push(matching, otherCategory);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ categoryId: EXPENSE_CATEGORY_ID, expenseNature: 'fixed' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('combines expenseNature with a startDate/endDate range using AND semantics', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const matching = storedTransaction({
+      transactionDate: '2026-09-15',
+      expenseNature: 'fixed',
+    });
+    const outsideRange = storedTransaction({
+      transactionDate: '2026-10-01',
+      expenseNature: 'fixed',
+    });
+    transactions.records.push(matching, outsideRange);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ expenseNature: 'fixed', startDate: '2026-09-01', endDate: '2026-09-30' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('rejects an invalid expenseNature filter value', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ expenseNature: 'half' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.listCalls).toHaveLength(0);
   });
 
   it('filters by createdBy without treating it as the requester identity', async () => {
@@ -1662,6 +1890,25 @@ describe('GET /api/households/:householdId/summary', () => {
     expect(response.body).toEqual({
       data: { totalIncome: '0.00', totalExpense: '30.50', balance: '-30.50' },
     });
+  });
+
+  it('sums fixed and variable expenses together without a separate breakdown', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ amount: '10.00', expenseNature: 'fixed' }),
+      storedTransaction({ amount: '20.50', expenseNature: 'variable' }),
+      storedTransaction({ amount: '5.00', expenseNature: null }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: { totalIncome: '0.00', totalExpense: '35.50', balance: '-35.50' },
+    });
+    expect(Object.keys(response.body.data)).toEqual(['totalIncome', 'totalExpense', 'balance']);
   });
 
   it('preserves precision and includes every status and source in the balance', async () => {
@@ -2654,6 +2901,121 @@ describe('PATCH /api/households/:householdId/transactions/:transactionId', () =>
     expect(response.body.data).toMatchObject({ type: 'income', categoryId: null });
   });
 
+  it('changes expenseNature from fixed to variable', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ expenseNature: 'fixed' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { expenseNature: 'variable' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.expenseNature).toBe('variable');
+    expect(transactions.records[0]?.expenseNature).toBe('variable');
+  });
+
+  it('changes expenseNature from variable to fixed', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ expenseNature: 'variable' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { expenseNature: 'fixed' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.expenseNature).toBe('fixed');
+  });
+
+  it('clears expenseNature with an explicit null', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ expenseNature: 'fixed' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { expenseNature: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.expenseNature).toBeNull();
+    expect(transactions.records[0]?.expenseNature).toBeNull();
+  });
+
+  it('automatically clears expenseNature when an expense becomes an income', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({ categoryId: null, expenseNature: 'fixed' });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { type: 'income' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ type: 'income', expenseNature: null });
+    expect(transactions.records[0]?.expenseNature).toBeNull();
+  });
+
+  it('keeps expenseNature null when an income becomes an expense without specifying it', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({
+      type: 'income',
+      categoryId: null,
+      expenseNature: null,
+    });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { type: 'expense' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ type: 'expense', expenseNature: null });
+  });
+
+  it('returns 400 when type=income and expenseNature are sent together', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction();
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, {
+      type: 'income',
+      categoryId: null,
+      expenseNature: 'fixed',
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request payload' },
+    });
+    expect(transactions.updateCalls).toHaveLength(0);
+  });
+
+  it('returns INVALID_EXPENSE_NATURE when expenseNature is set alone on a stored income transaction', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const existing = storedTransaction({
+      type: 'income',
+      categoryId: null,
+      expenseNature: null,
+    });
+    transactions.records.push(existing);
+    const token = await createToken(USER_ID);
+
+    const response = await patch(app, token, existing.id, { expenseNature: 'fixed' });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        code: 'INVALID_EXPENSE_NATURE',
+        message: 'expenseNature is only allowed for expense transactions',
+      },
+    });
+    expect(transactions.records[0]?.expenseNature).toBeNull();
+  });
+
   it('sets paidAt internally when a pending transaction becomes paid', async () => {
     const { app, transactions } = createTestContext();
     grantMembership(transactions, 'owner');
@@ -2735,6 +3097,7 @@ describe('PATCH /api/households/:householdId/transactions/:transactionId', () =>
     ['an invalid status', { status: 'overdue' }],
     ['an invalid type', { type: 'transfer' }],
     ['an invalid category UUID', { categoryId: 'not-a-uuid' }],
+    ['an invalid expenseNature', { expenseNature: 'half' }],
   ])('returns 400 for %s', async (_caseName, payload) => {
     const { app, transactions } = createTestContext();
     grantMembership(transactions, 'owner');
@@ -3103,6 +3466,7 @@ describe('TypeOrmTransactionRepository', () => {
       description: 'Mercado',
       status: 'pending',
       paidAt: null,
+      expenseNature: null,
     });
 
     expect(transactionCalls).toBe(1);
@@ -3135,6 +3499,55 @@ describe('TypeOrmTransactionRepository', () => {
     });
     expect(result).not.toHaveProperty('externalId');
   });
+
+  it.each(['fixed', 'variable', null] as const)(
+    'persists expenseNature=%s on insert',
+    async (expenseNature) => {
+      const membership = Object.assign(new HouseholdMemberEntity(), { id: randomUUID() });
+      const category = Object.assign(new CategoryEntity(), {
+        id: EXPENSE_CATEGORY_ID,
+        type: 'expense',
+      });
+      let createdData: Record<string, unknown> | undefined;
+      const manager = {
+        async findOne(entity: unknown): Promise<object | null> {
+          return entity === HouseholdMemberEntity ? membership : category;
+        },
+        create(_entity: unknown, data: Record<string, unknown>): TransactionEntity {
+          createdData = data;
+          return Object.assign(new TransactionEntity(), data);
+        },
+        async save(entity: TransactionEntity): Promise<TransactionEntity> {
+          return Object.assign(entity, { id: randomUUID(), createdAt: NOW, updatedAt: NOW });
+        },
+      } as unknown as EntityManager;
+      const dataSource = {
+        async transaction<T>(
+          operation: (transactionManager: EntityManager) => Promise<T>,
+        ): Promise<T> {
+          return operation(manager);
+        },
+      } as unknown as DataSource;
+      const repository = new TypeOrmTransactionRepository(dataSource);
+
+      const result = await repository.createAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        type: 'expense',
+        amount: '10.00',
+        transactionDate: '2026-09-13',
+        dueDate: null,
+        categoryId: EXPENSE_CATEGORY_ID,
+        description: null,
+        status: 'pending',
+        paidAt: null,
+        expenseNature,
+      });
+
+      expect(createdData).toMatchObject({ expenseNature });
+      expect(result.expenseNature).toBe(expenseNature);
+    },
+  );
 
   it.each([
     ['missing membership', null, null, ForbiddenError],
@@ -3177,6 +3590,7 @@ describe('TypeOrmTransactionRepository', () => {
         description: null,
         status: 'pending',
         paidAt: null,
+        expenseNature: null,
       }),
     ).rejects.toBeInstanceOf(errorType);
     expect(saveCalls).toBe(0);
@@ -3195,6 +3609,7 @@ describe('TypeOrmTransactionRepository', () => {
       status: 'paid',
       paidAt: NOW,
       source: 'manual',
+      expenseNature: null,
       createdBy: OTHER_USER_ID,
       createdAt: NOW,
       updatedAt: NOW,
@@ -3287,7 +3702,7 @@ describe('TypeOrmTransactionRepository', () => {
     );
     expect(query.andWhere.mock.calls[0]?.[1]).toEqual({ requesterId: USER_ID });
     expect(query.select).toHaveBeenCalledWith('transaction.id', 'id');
-    expect(query.addSelect).toHaveBeenCalledTimes(12);
+    expect(query.addSelect).toHaveBeenCalledTimes(13);
     expect(getRepository).toHaveBeenCalledTimes(2);
     expect(query.orderBy).toHaveBeenCalledWith('transaction.transaction_date', 'DESC');
     expect(query.addOrderBy.mock.calls).toEqual([
@@ -3311,6 +3726,7 @@ describe('TypeOrmTransactionRepository', () => {
           status: 'paid',
           paidAt: NOW,
           source: 'manual',
+          expenseNature: null,
           createdBy: OTHER_USER_ID,
           createdAt: NOW,
           updatedAt: NOW,
@@ -4050,6 +4466,207 @@ describe('TypeOrmTransactionRepository', () => {
       createdBy: OTHER_USER_ID,
     });
     expect(result.updatedAt.toISOString()).toBe('2026-09-14T10:00:00.000Z');
+  });
+
+  it('sets expenseNature on an expense-to-expense update', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '10.00',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      expenseNature: 'fixed',
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: USER_ID }),
+    });
+    let savedFields: Record<string, unknown> = {};
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async save(entity: TransactionEntity): Promise<TransactionEntity> {
+        savedFields = { ...entity };
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.updateAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+      expenseNature: 'variable',
+    });
+
+    expect(savedFields).toMatchObject({ expenseNature: 'variable' });
+    expect(result.expenseNature).toBe('variable');
+  });
+
+  it('automatically clears expenseNature when the final type becomes income', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'expense',
+      amount: '10.00',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      expenseNature: 'fixed',
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: USER_ID }),
+    });
+    let savedFields: Record<string, unknown> = {};
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async save(entity: TransactionEntity): Promise<TransactionEntity> {
+        savedFields = { ...entity };
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.updateAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+      type: 'income',
+    });
+
+    expect(savedFields).toMatchObject({ expenseNature: null });
+    expect(result.expenseNature).toBeNull();
+  });
+
+  it('keeps expenseNature null when the final type becomes expense without specifying it', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'income',
+      amount: '10.00',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      expenseNature: null,
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: USER_ID }),
+    });
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async save(entity: TransactionEntity): Promise<TransactionEntity> {
+        return entity;
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.updateAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      transactionId: existing.id,
+      type: 'expense',
+    });
+
+    expect(result.expenseNature).toBeNull();
+  });
+
+  it('rejects an explicit expenseNature when the final type is income, without saving', async () => {
+    const membership = Object.assign(new HouseholdMemberEntity(), {
+      id: randomUUID(),
+      role: 'owner',
+    });
+    const existing = Object.assign(new TransactionEntity(), {
+      id: randomUUID(),
+      type: 'income',
+      amount: '10.00',
+      transactionDate: '2026-09-13',
+      dueDate: null,
+      description: null,
+      status: 'pending',
+      paidAt: null,
+      source: 'manual',
+      externalId: null,
+      expenseNature: null,
+      createdAt: NOW,
+      category: null,
+      createdBy: Object.assign(new UserEntity(), { id: USER_ID }),
+    });
+    let saveCalls = 0;
+    const manager = {
+      async findOne(entity: unknown): Promise<object | null> {
+        return entity === HouseholdMemberEntity ? membership : existing;
+      },
+      async save(): Promise<never> {
+        saveCalls += 1;
+        throw new Error('Unexpected save');
+      },
+    } as unknown as EntityManager;
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.updateAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        transactionId: existing.id,
+        expenseNature: 'fixed',
+      }),
+    ).rejects.toBeInstanceOf(InvalidExpenseNatureError);
+    expect(saveCalls).toBe(0);
   });
 
   it('preserves the original paidAt when a paid transaction is updated as paid', async () => {

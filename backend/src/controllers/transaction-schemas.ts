@@ -33,6 +33,19 @@ export const amountSchema = z
 
 export const descriptionSchema = z.string().trim().max(255).nullable().optional();
 
+export const transactionExpenseNatureSchema = z.enum(['fixed', 'variable']);
+
+export function isExpenseNatureConsistentWithType(payload: {
+  type?: 'income' | 'expense' | undefined;
+  expenseNature?: 'fixed' | 'variable' | null | undefined;
+}): boolean {
+  return (
+    payload.type !== 'income' ||
+    payload.expenseNature === undefined ||
+    payload.expenseNature === null
+  );
+}
+
 export function serializeTransaction(transaction: TransactionRecord): {
   id: string;
   type: TransactionRecord['type'];
@@ -44,6 +57,7 @@ export function serializeTransaction(transaction: TransactionRecord): {
   status: TransactionRecord['status'];
   paidAt: string | null;
   source: TransactionRecord['source'];
+  expenseNature: TransactionRecord['expenseNature'];
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -59,6 +73,7 @@ export function serializeTransaction(transaction: TransactionRecord): {
     status: transaction.status,
     paidAt: transaction.paidAt?.toISOString() ?? null,
     source: transaction.source,
+    expenseNature: transaction.expenseNature,
     createdBy: transaction.createdBy,
     createdAt: transaction.createdAt.toISOString(),
     updatedAt: transaction.updatedAt.toISOString(),

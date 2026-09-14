@@ -9,6 +9,7 @@ import { HouseholdEntity } from './entities/household.entity.js';
 import { TransactionEntity } from './entities/transaction.entity.js';
 import { UserEntity } from './entities/user.entity.js';
 import { CreateInitialDomain1789300800000 } from './migrations/1789300800000-create-initial-domain.js';
+import { AddTransactionExpenseNature1789360000000 } from './migrations/1789360000000-add-transaction-expense-nature.js';
 
 export const appDataSource = new DataSource({
   type: 'postgres',
@@ -16,7 +17,7 @@ export const appDataSource = new DataSource({
   synchronize: false,
   logging: env.databaseLogging,
   entities: [UserEntity, HouseholdEntity, HouseholdMemberEntity, CategoryEntity, TransactionEntity],
-  migrations: [CreateInitialDomain1789300800000],
+  migrations: [CreateInitialDomain1789300800000, AddTransactionExpenseNature1789360000000],
   subscribers: [],
   uuidExtension: 'pgcrypto',
   connectTimeoutMS: 5_000,

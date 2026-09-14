@@ -13,6 +13,7 @@ import { AddHouseholdMemberService } from '../services/add-household-member-serv
 import { CreateHouseholdService } from '../services/create-household-service.js';
 import { ListHouseholdMembersService } from '../services/list-household-members-service.js';
 import { ListHouseholdsService } from '../services/list-households-service.js';
+import type { TodayProvider } from '../services/list-transactions-service.js';
 import { createCategoryRouter } from './category-routes.js';
 import { createTransactionRouter } from './transaction-routes.js';
 
@@ -22,6 +23,7 @@ export function createHouseholdRouter(
   jwtSecret: Uint8Array,
   categories: CategoryRepository,
   transactions: TransactionRepository,
+  todayProvider?: TodayProvider,
 ): Router {
   const householdRouter = Router();
   const addHouseholdMember = new AddHouseholdMemberService(households, users);
@@ -35,7 +37,7 @@ export function createHouseholdRouter(
   );
   householdRouter.use(
     '/:householdId/transactions',
-    createTransactionRouter(transactions, jwtSecret),
+    createTransactionRouter(transactions, jwtSecret, todayProvider),
   );
 
   householdRouter.post(

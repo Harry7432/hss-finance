@@ -9,6 +9,7 @@ import { TransactionNotFoundError } from '../errors/transaction-not-found-error.
 
 export type TransactionType = 'income' | 'expense';
 export type TransactionStatus = 'pending' | 'paid';
+export type TransactionState = 'pending' | 'overdue';
 export type TransactionSource = 'manual' | 'bank_import';
 
 export interface TransactionRecord {
@@ -45,12 +46,14 @@ export interface ListTransactionsData {
   requesterId: string;
   type?: TransactionType;
   status?: TransactionStatus;
+  state?: TransactionState;
   categoryId?: string;
   createdBy?: string;
   startDate?: string;
   endDate?: string;
   page: number;
   limit: number;
+  today: string;
 }
 
 export interface ListTransactionsResult {
@@ -367,6 +370,23 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
 
     if (data.status !== undefined) {
       query.andWhere('transaction.status = :status', { status: data.status });
+    }
+
+    if (data.state !== undefined) {
+      query.andWhere('transaction.status = :stateStatus', { stateStatus: 'pending' });
+
+      if (data.state === 'pending') {
+        query.andWhere(
+          `(
+            transaction.due_date IS NULL
+            OR transaction.due_date >= :today
+          )`,
+          { today: data.today },
+        );
+      } else {
+        query.andWhere('transaction.due_date IS NOT NULL');
+        query.andWhere('transaction.due_date < :today', { today: data.today });
+      }
     }
 
     if (data.categoryId !== undefined) {

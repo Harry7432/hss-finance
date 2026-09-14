@@ -22,6 +22,7 @@ import {
 } from './repositories/transaction-repository.js';
 import { TypeOrmUserRepository, type UserRepository } from './repositories/user-repository.js';
 import { createApiRouter } from './routes/index.js';
+import type { TodayProvider } from './services/list-transactions-service.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
@@ -36,6 +37,7 @@ export function createApp(
   households: HouseholdRepository = householdRepository,
   categories: CategoryRepository = categoryRepository,
   transactions: TransactionRepository = transactionRepository,
+  todayProvider?: TodayProvider,
 ): Express {
   const app = express();
 
@@ -44,7 +46,15 @@ export function createApp(
   app.use(express.json());
   app.use(
     '/api',
-    createApiRouter(database, users, tokenSecret, households, categories, transactions),
+    createApiRouter(
+      database,
+      users,
+      tokenSecret,
+      households,
+      categories,
+      transactions,
+      todayProvider,
+    ),
   );
   app.use(errorHandler);
 

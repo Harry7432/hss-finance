@@ -5,6 +5,7 @@ import type { CategoryRepository } from '../repositories/category-repository.js'
 import type { HouseholdRepository } from '../repositories/household-repository.js';
 import type { TransactionRepository } from '../repositories/transaction-repository.js';
 import type { UserRepository } from '../repositories/user-repository.js';
+import type { TodayProvider } from '../services/list-transactions-service.js';
 import { createAuthRouter } from './auth-routes.js';
 import { createHealthRouter } from './health-routes.js';
 import { createHouseholdRouter } from './household-routes.js';
@@ -16,6 +17,7 @@ export function createApiRouter(
   households: HouseholdRepository,
   categories: CategoryRepository,
   transactions: TransactionRepository,
+  todayProvider?: TodayProvider,
 ): Router {
   const apiRouter = Router();
 
@@ -23,7 +25,7 @@ export function createApiRouter(
   apiRouter.use('/health', createHealthRouter(database));
   apiRouter.use(
     '/households',
-    createHouseholdRouter(households, users, jwtSecret, categories, transactions),
+    createHouseholdRouter(households, users, jwtSecret, categories, transactions, todayProvider),
   );
 
   return apiRouter;

@@ -16,6 +16,7 @@ const limitSchema = pageSchema.refine((limit) => limit <= 100);
 const listTransactionsQuerySchema = z.strictObject({
   type: z.enum(['income', 'expense']).optional(),
   status: z.enum(['pending', 'paid']).optional(),
+  state: z.enum(['pending', 'overdue']).optional(),
   categoryId: z.uuid().optional(),
   createdBy: z.uuid().optional(),
   startDate: transactionDateSchema.optional(),
@@ -70,6 +71,7 @@ export function listTransactionsController(service: ListTransactionsService): Re
         limit,
         ...(parsedQuery.data.type === undefined ? {} : { type: parsedQuery.data.type }),
         ...(parsedQuery.data.status === undefined ? {} : { status: parsedQuery.data.status }),
+        ...(parsedQuery.data.state === undefined ? {} : { state: parsedQuery.data.state }),
         ...(parsedQuery.data.categoryId === undefined
           ? {}
           : { categoryId: parsedQuery.data.categoryId }),

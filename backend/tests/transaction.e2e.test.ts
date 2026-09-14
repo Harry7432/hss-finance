@@ -52,6 +52,7 @@ const EXPENSE_CATEGORY_ID = randomUUID();
 const INCOME_CATEGORY_ID = randomUUID();
 const CROSS_HOUSEHOLD_CATEGORY_ID = randomUUID();
 const NOW = new Date('2026-09-13T18:00:00.000Z');
+const TODAY = '2026-09-13';
 const database: DatabaseReadiness = {
   async isReady(): Promise<boolean> {
     return true;
@@ -229,6 +230,14 @@ class InMemoryTransactionRepository implements TransactionRepository {
       .filter((record) => record.householdId === data.householdId)
       .filter((record) => data.type === undefined || record.type === data.type)
       .filter((record) => data.status === undefined || record.status === data.status)
+      .filter(
+        (record) =>
+          data.state === undefined ||
+          (record.status === 'pending' &&
+            (data.state === 'overdue'
+              ? record.dueDate !== null && record.dueDate < data.today
+              : record.dueDate === null || record.dueDate >= data.today)),
+      )
       .filter((record) => data.categoryId === undefined || record.categoryId === data.categoryId)
       .filter((record) => data.createdBy === undefined || record.createdBy === data.createdBy)
       .filter((record) => data.startDate === undefined || record.transactionDate >= data.startDate)
@@ -394,7 +403,10 @@ function grantMembership(
   transactions.memberships.push({ householdId, userId, role });
 }
 
-function createTestContext(transactions = new InMemoryTransactionRepository()) {
+function createTestContext(
+  transactions = new InMemoryTransactionRepository(),
+  todayProvider = (): string => TODAY,
+) {
   const app = createApp(
     database,
     new StubUserRepository(),
@@ -402,6 +414,7 @@ function createTestContext(transactions = new InMemoryTransactionRepository()) {
     new StubHouseholdRepository(),
     new StubCategoryRepository(),
     transactions,
+    todayProvider,
   );
 
   return { app, transactions };
@@ -829,11 +842,10 @@ describe('GET /api/households/:householdId/transactions', () => {
       transactions.records.push(storedTransaction());
       const token = await createToken(userId);
 
-      const operation = request(app)
+      const response = await request(app)
         .get(`/api/households/${householdId}/transactions`)
+        .query({ state: 'pending', ...(createdBy === undefined ? {} : { createdBy }) })
         .set('Authorization', `Bearer ${token}`);
-      const response =
-        createdBy === undefined ? await operation : await operation.query({ createdBy });
 
       expect(response.status).toBe(403);
       expect(response.body).toEqual({
@@ -854,6 +866,7 @@ describe('GET /api/households/:householdId/transactions', () => {
 
       const response = await request(app)
         .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .query({ state: 'pending' })
         .set('Authorization', `Bearer ${token}`);
 
       expect(response.status).toBe(200);
@@ -887,6 +900,138 @@ describe('GET /api/households/:householdId/transactions', () => {
     expect(response.status).toBe(200);
     expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
     expect(transactions.listCalls[0]).toMatchObject({ [key]: value });
+  });
+
+  it('classifies pending transactions from dueDate without exposing a derived field', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const withoutDueDate = storedTransaction({ dueDate: null });
+    const dueToday = storedTransaction({ dueDate: TODAY });
+    const future = storedTransaction({ dueDate: '2026-09-14' });
+    const overdue = storedTransaction({ dueDate: '2026-09-12' });
+    const paid = storedTransaction({ status: 'paid', dueDate: '2026-09-14', paidAt: NOW });
+    transactions.records.push(withoutDueDate, dueToday, future, overdue, paid);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ state: 'pending' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(new Set(response.body.data.map((record: { id: string }) => record.id))).toEqual(
+      new Set([withoutDueDate.id, dueToday.id, future.id]),
+    );
+    expect(response.body.data).toHaveLength(3);
+    expect(response.body.data[0]).not.toHaveProperty('state');
+    expect(transactions.listCalls[0]).toMatchObject({ state: 'pending', today: TODAY });
+  });
+
+  it('classifies overdue transactions and excludes every non-overdue case', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const overdue = storedTransaction({ dueDate: '2026-09-12' });
+    const dueToday = storedTransaction({ dueDate: TODAY });
+    const future = storedTransaction({ dueDate: '2026-09-14' });
+    const withoutDueDate = storedTransaction({ dueDate: null });
+    const paidOverdue = storedTransaction({ status: 'paid', dueDate: '2026-09-12', paidAt: NOW });
+    transactions.records.push(overdue, dueToday, future, withoutDueDate, paidOverdue);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ state: 'overdue' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([overdue.id]);
+    expect(response.body.meta.total).toBe(1);
+  });
+
+  it.each([
+    ['paid', 'pending', false],
+    ['paid', 'overdue', false],
+    ['pending', 'pending', true],
+    ['pending', 'overdue', true],
+  ] as const)(
+    'combines status=%s and state=%s using AND semantics',
+    async (status, state, shouldMatch) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'member');
+      const matching = storedTransaction({ dueDate: state === 'overdue' ? '2026-09-12' : TODAY });
+      transactions.records.push(matching);
+      const token = await createToken(USER_ID);
+
+      const response = await request(app)
+        .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+        .query({ status, state })
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.map((record: { id: string }) => record.id)).toEqual(
+        shouldMatch ? [matching.id] : [],
+      );
+    },
+  );
+
+  it('combines state with type, categoryId, createdBy, and date range filters', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    const matching = storedTransaction({
+      dueDate: '2026-09-12',
+      createdBy: OTHER_USER_ID,
+      transactionDate: '2026-09-10',
+    });
+    const base = {
+      dueDate: '2026-09-12',
+      createdBy: OTHER_USER_ID,
+      transactionDate: '2026-09-10',
+    };
+    transactions.records.push(
+      matching,
+      storedTransaction({ ...base, type: 'income' }),
+      storedTransaction({ ...base, categoryId: null }),
+      storedTransaction({ ...base, createdBy: USER_ID }),
+      storedTransaction({ ...base, transactionDate: '2026-09-01' }),
+      storedTransaction({ ...base, transactionDate: '2026-09-30' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({
+        state: 'overdue',
+        type: 'expense',
+        categoryId: EXPENSE_CATEGORY_ID,
+        createdBy: OTHER_USER_ID,
+        startDate: '2026-09-05',
+        endDate: '2026-09-20',
+      })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([matching.id]);
+  });
+
+  it('applies pagination after state and reports the state-filtered total', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ id: '00000000-0000-4000-8000-000000000001', dueDate: '2026-09-10' }),
+      storedTransaction({ id: '00000000-0000-4000-8000-000000000002', dueDate: '2026-09-11' }),
+      storedTransaction({ id: '00000000-0000-4000-8000-000000000003', dueDate: '2026-09-12' }),
+      storedTransaction({ dueDate: TODAY }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ state: 'overdue', page: '2', limit: '1' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.meta).toEqual({ page: 2, limit: 1, total: 3, totalPages: 3 });
   });
 
   it('filters by categoryId', async () => {
@@ -1048,6 +1193,7 @@ describe('GET /api/households/:householdId/transactions', () => {
   it.each([
     ['invalid type', { type: 'transfer' }],
     ['invalid status', { status: 'overdue' }],
+    ['invalid state', { state: 'paid' }],
     ['invalid categoryId UUID', { categoryId: 'invalid' }],
     ['invalid createdBy UUID', { createdBy: 'invalid' }],
     ['invalid startDate format', { startDate: '01-09-2026' }],
@@ -1089,6 +1235,7 @@ describe('GET /api/households/:householdId/transactions', () => {
       requesterId: USER_ID,
       page: 1,
       limit: 20,
+      today: TODAY,
     });
   });
 
@@ -2315,6 +2462,7 @@ describe('TypeOrmTransactionRepository', () => {
       endDate: '2026-09-30',
       page: 3,
       limit: 10,
+      today: TODAY,
     };
 
     const result = await repository.listAsMember(input);
@@ -2382,6 +2530,74 @@ describe('TypeOrmTransactionRepository', () => {
     });
   });
 
+  it.each(['pending', 'overdue'] as const)(
+    'applies the derived %s state to count and rows without a transaction or lock',
+    async (state) => {
+      const query = {
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getCount: jest.fn(async () => 0),
+        getRawMany: jest.fn(async () => []),
+      };
+      const membershipFindOne = jest.fn(async () =>
+        Object.assign(new HouseholdMemberEntity(), { id: randomUUID() }),
+      );
+      const createQueryBuilder = jest.fn(() => query);
+      const transaction = jest.fn(async () => {
+        throw new Error('listAsMember must not open a transaction');
+      });
+      const getRepository = jest.fn((entity: unknown) =>
+        entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+      );
+      const dataSource = { getRepository, transaction } as unknown as DataSource;
+      const repository = new TypeOrmTransactionRepository(dataSource);
+
+      await repository.listAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        status: 'paid',
+        state,
+        page: 1,
+        limit: 20,
+        today: TODAY,
+      });
+
+      expect(query.andWhere.mock.calls[0]?.[0]).toContain('FROM household_members');
+      expect(query.andWhere.mock.calls[1]).toEqual([
+        'transaction.status = :status',
+        { status: 'paid' },
+      ]);
+      expect(query.andWhere.mock.calls[2]).toEqual([
+        'transaction.status = :stateStatus',
+        { stateStatus: 'pending' },
+      ]);
+
+      if (state === 'pending') {
+        expect(query.andWhere).toHaveBeenCalledTimes(4);
+        expect(query.andWhere.mock.calls[3]?.[0]).toContain('transaction.due_date IS NULL');
+        expect(query.andWhere.mock.calls[3]?.[0]).toContain('OR transaction.due_date >= :today');
+        expect(query.andWhere.mock.calls[3]?.[1]).toEqual({ today: TODAY });
+      } else {
+        expect(query.andWhere.mock.calls.slice(3)).toEqual([
+          ['transaction.due_date IS NOT NULL'],
+          ['transaction.due_date < :today', { today: TODAY }],
+        ]);
+      }
+
+      expect(query.getCount).toHaveBeenCalledTimes(1);
+      expect(query.getRawMany).toHaveBeenCalledTimes(1);
+      expect(createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(transaction).not.toHaveBeenCalled();
+      expect(query).not.toHaveProperty('setLock');
+    },
+  );
+
   it('does not create a transaction QueryBuilder when membership is absent', async () => {
     const membershipFindOne = jest.fn(async () => null);
     const createQueryBuilder = jest.fn();
@@ -2398,6 +2614,7 @@ describe('TypeOrmTransactionRepository', () => {
         requesterId: USER_ID,
         page: 1,
         limit: 20,
+        today: TODAY,
       }),
     ).rejects.toBeInstanceOf(ForbiddenError);
 

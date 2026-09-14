@@ -9,6 +9,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { createApp } from '../src/app.js';
 import type { DatabaseReadiness } from '../src/database/database-readiness.js';
 import { CategoryEntity } from '../src/database/entities/category.entity.js';
+import { HouseholdEntity } from '../src/database/entities/household.entity.js';
 import { HouseholdMemberEntity } from '../src/database/entities/household-member.entity.js';
 import { TransactionEntity } from '../src/database/entities/transaction.entity.js';
 import { ForbiddenError } from '../src/errors/forbidden-error.js';
@@ -33,6 +34,8 @@ import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
   type DeleteTransactionData,
+  type GetHouseholdSummaryData,
+  type HouseholdSummary,
   type ListTransactionsData,
   type ListTransactionsResult,
   type TransactionRecord,
@@ -62,6 +65,17 @@ const database: DatabaseReadiness = {
 interface StoredTransaction extends TransactionRecord {
   householdId: string;
   externalId: null;
+}
+
+function amountToCents(amount: string): bigint {
+  const [integer = '0', fraction = ''] = amount.split('.');
+  return BigInt(`${integer}${fraction.padEnd(2, '0')}`);
+}
+
+function formatCents(value: bigint): string {
+  const sign = value < 0n ? '-' : '';
+  const absolute = value < 0n ? -value : value;
+  return `${sign}${absolute / 100n}.${(absolute % 100n).toString().padStart(2, '0')}`;
 }
 
 class StubUserRepository implements UserRepository {
@@ -139,6 +153,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
   readonly createCalls: CreateTransactionData[] = [];
   readonly deleteCalls: DeleteTransactionData[] = [];
   readonly listCalls: ListTransactionsData[] = [];
+  readonly summaryCalls: GetHouseholdSummaryData[] = [];
   readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
     householdId: string;
@@ -160,6 +175,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
     private readonly listError?: Error,
     private readonly updateError?: Error,
     private readonly deleteError?: Error,
+    private readonly summaryError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -253,6 +269,48 @@ class InMemoryTransactionRepository implements TransactionRepository {
     return {
       records: filtered.slice(offset, offset + data.limit),
       total: filtered.length,
+    };
+  }
+
+  async getSummaryAsMember(data: GetHouseholdSummaryData): Promise<HouseholdSummary> {
+    this.summaryCalls.push(data);
+
+    if (this.summaryError) {
+      throw this.summaryError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    let totalIncome = 0n;
+    let totalExpense = 0n;
+
+    for (const record of this.records) {
+      if (
+        record.householdId !== data.householdId ||
+        (data.startDate !== undefined && record.transactionDate < data.startDate) ||
+        (data.endDate !== undefined && record.transactionDate > data.endDate)
+      ) {
+        continue;
+      }
+
+      if (record.type === 'income') {
+        totalIncome += amountToCents(record.amount);
+      } else {
+        totalExpense += amountToCents(record.amount);
+      }
+    }
+
+    return {
+      totalIncome: formatCents(totalIncome),
+      totalExpense: formatCents(totalExpense),
+      balance: formatCents(totalIncome - totalExpense),
     };
   }
 
@@ -637,7 +695,7 @@ describe('POST /api/households/:householdId/transactions', () => {
   it.each([
     ['a nonexistent household', randomUUID(), USER_ID],
     ['a user without membership', HOUSEHOLD_ID, USER_ID],
-    ['the household creator without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+    ['a transaction creator without membership', HOUSEHOLD_ID, OTHER_USER_ID],
   ])(
     'returns 403 without revealing whether the household exists for %s',
     async (_case, id, userId) => {
@@ -1447,6 +1505,231 @@ describe('GET /api/households/:householdId/transactions', () => {
       error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
     });
     expect(JSON.stringify(response.body)).not.toContain('sensitive listing database details');
+  });
+});
+
+describe('GET /api/households/:householdId/summary', () => {
+  const getSummary = (
+    app: Express,
+    token: string,
+    query: Record<string, unknown> = {},
+    householdId: string = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .get(`/api/households/${householdId}/summary`)
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+  it.each(['owner', 'member'] as const)(
+    'allows an authenticated %s to view an empty summary',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role);
+      const token = await createToken(USER_ID);
+
+      const response = await getSummary(app, token);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        data: { totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      });
+      expect(Object.keys(response.body.data)).toEqual(['totalIncome', 'totalExpense', 'balance']);
+      expect(Object.values(response.body.data).every((value) => typeof value === 'string')).toBe(
+        true,
+      );
+    },
+  );
+
+  it('sums multiple incomes and returns zero expense with a positive balance', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '10.00' }),
+      storedTransaction({ type: 'income', amount: '20.50' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: { totalIncome: '30.50', totalExpense: '0.00', balance: '30.50' },
+    });
+  });
+
+  it('sums multiple expenses and returns zero income with a negative balance', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ amount: '10.00' }),
+      storedTransaction({ amount: '20.50' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: { totalIncome: '0.00', totalExpense: '30.50', balance: '-30.50' },
+    });
+  });
+
+  it('preserves precision and includes every status and source in the balance', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '999999999900.10', status: 'pending' }),
+      storedTransaction({
+        type: 'income',
+        amount: '0.20',
+        status: 'paid',
+        paidAt: NOW,
+        source: 'bank_import',
+      }),
+      storedTransaction({ amount: '0.03', status: 'pending', dueDate: '2026-09-12' }),
+      storedTransaction({ amount: '0.07', status: 'paid', paidAt: NOW, source: 'bank_import' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: {
+        totalIncome: '999999999900.30',
+        totalExpense: '0.10',
+        balance: '999999999900.20',
+      },
+    });
+  });
+
+  it.each([
+    ['only startDate', { startDate: '2026-09-10' }, '14.00'],
+    ['only endDate', { endDate: '2026-09-20' }, '7.00'],
+    ['inclusive startDate and endDate', { startDate: '2026-09-10', endDate: '2026-09-20' }, '6.00'],
+  ] as const)('applies %s to transactionDate', async (_caseName, query, totalIncome) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '1.00', transactionDate: '2026-09-01' }),
+      storedTransaction({ type: 'income', amount: '2.00', transactionDate: '2026-09-10' }),
+      storedTransaction({ type: 'income', amount: '4.00', transactionDate: '2026-09-20' }),
+      storedTransaction({ type: 'income', amount: '8.00', transactionDate: '2026-09-30' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token, query);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      totalIncome,
+      totalExpense: '0.00',
+      balance: totalIncome,
+    });
+    expect(transactions.summaryCalls[0]).toMatchObject(query);
+  });
+
+  it.each([
+    ['an inverted range', { startDate: '2026-09-20', endDate: '2026-09-10' }],
+    ['an invalid startDate', { startDate: '2026-02-30' }],
+    ['an invalid endDate', { endDate: '13-09-2026' }],
+    ['an unknown query', { status: 'paid' }],
+  ])('returns 400 without querying the repository for %s', async (_caseName, query) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token, query);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.summaryCalls).toHaveLength(0);
+  });
+
+  it('returns 401 without Authorization', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).get(`/api/households/${HOUSEHOLD_ID}/summary`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.summaryCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+    ['a nonexistent household', randomUUID(), USER_ID],
+    ['the household creator without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+  ] as const)('returns the same 403 for %s', async (_caseName, householdId, requesterId) => {
+    const { app, transactions } = createTestContext();
+    transactions.records.push(storedTransaction({ createdBy: requesterId }));
+    const token = await createToken(requesterId);
+
+    const response = await getSummary(app, token, {}, householdId);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('excludes transactions from another household and preserves requester identity', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '10.00' }),
+      storedTransaction({ householdId: OTHER_HOUSEHOLD_ID, type: 'income', amount: '999.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      totalIncome: '10.00',
+      totalExpense: '0.00',
+      balance: '10.00',
+    });
+    expect(transactions.summaryCalls[0]).toEqual({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+    });
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token, {}, 'not-a-uuid');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+    });
+    expect(transactions.summaryCalls).toHaveLength(0);
+  });
+
+  it('returns a sanitized 500 for an unexpected summary error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive summary database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getSummary(app, token);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive summary database details');
   });
 });
 
@@ -2620,6 +2903,165 @@ describe('TypeOrmTransactionRepository', () => {
 
     expect(membershipFindOne).toHaveBeenCalledTimes(1);
     expect(getRepository).toHaveBeenCalledTimes(1);
+    expect(createQueryBuilder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('aggregates a scoped summary after membership without loading transactions or locking', async () => {
+    const events: string[] = [];
+    const query = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => {
+        events.push('aggregate');
+        return {
+          totalIncome: '999999999999.99',
+          totalExpense: '0',
+          balance: '-0.1',
+        };
+      }),
+    };
+    const membershipFindOne = jest.fn(async (options: unknown) => {
+      events.push('membership');
+      return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), options });
+    });
+    const createQueryBuilder = jest.fn(() => {
+      events.push('queryBuilder');
+      return query;
+    });
+    const transaction = jest.fn(async () => {
+      throw new Error('getSummaryAsMember must not open a transaction');
+    });
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.getSummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+    });
+
+    expect(events).toEqual(['membership', 'queryBuilder', 'aggregate']);
+    expect(membershipFindOne).toHaveBeenCalledWith({
+      select: { id: true },
+      where: {
+        household: { id: HOUSEHOLD_ID },
+        user: { id: USER_ID },
+      },
+    });
+    expect(membershipFindOne.mock.calls[0]?.[0]).not.toHaveProperty('lock');
+    expect(query.select.mock.calls[0]?.[0]).toContain("SUM(CASE WHEN transaction.type = 'income'");
+    expect(query.select.mock.calls[0]?.[0]).toContain('COALESCE');
+    expect(query.select.mock.calls[0]?.[1]).toBe('totalIncome');
+    expect(query.addSelect.mock.calls[0]?.[0]).toContain(
+      "SUM(CASE WHEN transaction.type = 'expense'",
+    );
+    expect(query.addSelect.mock.calls[0]?.[1]).toBe('totalExpense');
+    expect(query.addSelect.mock.calls[1]?.[0]).toContain(
+      "WHEN transaction.type = 'expense' THEN -transaction.amount",
+    );
+    expect(query.addSelect.mock.calls[1]?.[1]).toBe('balance');
+    expect(query.where).toHaveBeenCalledWith('transaction.household_id = :householdId', {
+      householdId: HOUSEHOLD_ID,
+    });
+    expect(query.andWhere.mock.calls[0]?.[0]).toContain('FROM household_members');
+    expect(query.andWhere.mock.calls[0]?.[1]).toEqual({ requesterId: USER_ID });
+    expect(query.andWhere.mock.calls.slice(1)).toEqual([
+      ['transaction.transaction_date >= :startDate', { startDate: '2026-09-01' }],
+      ['transaction.transaction_date <= :endDate', { endDate: '2026-09-30' }],
+    ]);
+    expect(query.getRawOne).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveProperty('getMany');
+    expect(query).not.toHaveProperty('setLock');
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      totalIncome: '999999999999.99',
+      totalExpense: '0.00',
+      balance: '-0.10',
+    });
+  });
+
+  it.each([
+    ['null', null, '0.00'],
+    ['zero', '0', '0.00'],
+    ['negative zero', '-0', '0.00'],
+    ['integer', '10', '10.00'],
+    ['one decimal place', '10.5', '10.50'],
+    ['two decimal places', '10.50', '10.50'],
+    ['large value', '999999999999.99', '999999999999.99'],
+  ] as const)(
+    'normalizes a %s aggregate without floating-point conversion',
+    async (_caseName, aggregate, normalized) => {
+      const query = {
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getRawOne: jest.fn(async () => ({
+          totalIncome: aggregate,
+          totalExpense: aggregate,
+          balance: aggregate,
+        })),
+      };
+      const membershipFindOne = jest.fn(async () => new HouseholdMemberEntity());
+      const createQueryBuilder = jest.fn(() => query);
+      const getRepository = jest.fn((entity: unknown) =>
+        entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+      );
+      const dataSource = { getRepository } as unknown as DataSource;
+      const repository = new TypeOrmTransactionRepository(dataSource);
+
+      const result = await repository.getSummaryAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+      });
+
+      expect(result).toEqual({
+        totalIncome: normalized,
+        totalExpense: normalized,
+        balance: normalized,
+      });
+    },
+  );
+
+  it('does not use household createdBy or aggregate when membership is absent', async () => {
+    const membershipFindOne = jest.fn(async () => null);
+    const householdFindOne = jest.fn(async () =>
+      Object.assign(new HouseholdEntity(), {
+        id: HOUSEHOLD_ID,
+        createdBy: Object.assign(new UserEntity(), { id: USER_ID }),
+      }),
+    );
+    const createQueryBuilder = jest.fn();
+    const transaction = jest.fn();
+    const getRepository = jest.fn((entity: unknown) => {
+      if (entity === HouseholdMemberEntity) {
+        return { findOne: membershipFindOne };
+      }
+
+      if (entity === HouseholdEntity) {
+        return { findOne: householdFindOne };
+      }
+
+      return { createQueryBuilder };
+    });
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.getSummaryAsMember({ householdId: HOUSEHOLD_ID, requesterId: USER_ID }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    expect(membershipFindOne).toHaveBeenCalledTimes(1);
+    expect(getRepository).toHaveBeenCalledTimes(1);
+    expect(getRepository).not.toHaveBeenCalledWith(HouseholdEntity);
+    expect(householdFindOne).not.toHaveBeenCalled();
     expect(createQueryBuilder).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
   });

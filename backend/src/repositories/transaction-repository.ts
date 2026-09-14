@@ -61,6 +61,19 @@ export interface ListTransactionsResult {
   total: number;
 }
 
+export interface GetHouseholdSummaryData {
+  householdId: string;
+  requesterId: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface HouseholdSummary {
+  totalIncome: string;
+  totalExpense: string;
+  balance: string;
+}
+
 export interface UpdateTransactionData {
   householdId: string;
   requesterId: string;
@@ -83,6 +96,7 @@ export interface DeleteTransactionData {
 export interface TransactionRepository {
   createAsMember(data: CreateTransactionData): Promise<TransactionRecord>;
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
+  getSummaryAsMember(data: GetHouseholdSummaryData): Promise<HouseholdSummary>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
   deleteAsMember(data: DeleteTransactionData): Promise<void>;
 }
@@ -101,6 +115,27 @@ interface TransactionRow {
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
+}
+
+interface HouseholdSummaryRow {
+  totalIncome: string | null;
+  totalExpense: string | null;
+  balance: string | null;
+}
+
+function normalizeMonetaryAggregate(value: string | null | undefined): string {
+  const match = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(value ?? '0');
+
+  if (!match) {
+    throw new Error('Invalid monetary aggregate');
+  }
+
+  const sign = match[1] ?? '';
+  const integer = (match[2] ?? '0').replace(/^0+(?=\d)/, '');
+  const fraction = (match[3] ?? '').padEnd(2, '0');
+  const normalizedSign = /^0+$/.test(integer) && /^0+$/.test(fraction) ? '' : sign;
+
+  return `${normalizedSign}${integer}.${fraction}`;
 }
 
 function toTransactionRecord(transaction: TransactionRow): TransactionRecord {
@@ -335,6 +370,79 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
 
       await manager.remove(transaction);
     });
+  }
+
+  async getSummaryAsMember(data: GetHouseholdSummaryData): Promise<HouseholdSummary> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const query = this.dataSource
+      .getRepository(TransactionEntity)
+      .createQueryBuilder('transaction')
+      .select(
+        `COALESCE(
+          SUM(CASE WHEN transaction.type = 'income' THEN transaction.amount ELSE 0 END),
+          0
+        )`,
+        'totalIncome',
+      )
+      .addSelect(
+        `COALESCE(
+          SUM(CASE WHEN transaction.type = 'expense' THEN transaction.amount ELSE 0 END),
+          0
+        )`,
+        'totalExpense',
+      )
+      .addSelect(
+        `COALESCE(
+          SUM(
+            CASE
+              WHEN transaction.type = 'income' THEN transaction.amount
+              WHEN transaction.type = 'expense' THEN -transaction.amount
+              ELSE 0
+            END
+          ),
+          0
+        )`,
+        'balance',
+      )
+      .where('transaction.household_id = :householdId', { householdId: data.householdId })
+      .andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM household_members requester_membership
+          WHERE requester_membership.household_id = transaction.household_id
+            AND requester_membership.user_id = :requesterId
+        )`,
+        { requesterId: data.requesterId },
+      );
+
+    if (data.startDate !== undefined) {
+      query.andWhere('transaction.transaction_date >= :startDate', {
+        startDate: data.startDate,
+      });
+    }
+
+    if (data.endDate !== undefined) {
+      query.andWhere('transaction.transaction_date <= :endDate', { endDate: data.endDate });
+    }
+
+    const summary = await query.getRawOne<HouseholdSummaryRow>();
+
+    return {
+      totalIncome: normalizeMonetaryAggregate(summary?.totalIncome),
+      totalExpense: normalizeMonetaryAggregate(summary?.totalExpense),
+      balance: normalizeMonetaryAggregate(summary?.balance),
+    };
   }
 
   async listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult> {

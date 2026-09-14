@@ -74,6 +74,22 @@ export interface HouseholdSummary {
   balance: string;
 }
 
+export interface GetHouseholdUserSummaryData {
+  householdId: string;
+  requesterId: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface HouseholdUserSummaryEntry {
+  userId: string;
+  name: string;
+  totalIncome: string;
+  totalExpense: string;
+  balance: string;
+  expenseSharePercentage: string;
+}
+
 export interface UpdateTransactionData {
   householdId: string;
   requesterId: string;
@@ -97,6 +113,7 @@ export interface TransactionRepository {
   createAsMember(data: CreateTransactionData): Promise<TransactionRecord>;
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
   getSummaryAsMember(data: GetHouseholdSummaryData): Promise<HouseholdSummary>;
+  getUserSummaryAsMember(data: GetHouseholdUserSummaryData): Promise<HouseholdUserSummaryEntry[]>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
   deleteAsMember(data: DeleteTransactionData): Promise<void>;
 }
@@ -123,6 +140,18 @@ interface HouseholdSummaryRow {
   balance: string | null;
 }
 
+interface HouseholdUserSummaryRow {
+  userId: string;
+  name: string;
+  totalIncome: string | null;
+  totalExpense: string | null;
+  balance: string | null;
+}
+
+interface HouseholdTotalExpenseRow {
+  totalExpense: string | null;
+}
+
 function normalizeMonetaryAggregate(value: string | null | undefined): string {
   const match = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(value ?? '0');
 
@@ -136,6 +165,32 @@ function normalizeMonetaryAggregate(value: string | null | undefined): string {
   const normalizedSign = /^0+$/.test(integer) && /^0+$/.test(fraction) ? '' : sign;
 
   return `${normalizedSign}${integer}.${fraction}`;
+}
+
+function toBigIntCents(normalizedAmount: string): bigint {
+  const [integer, fraction = '00'] = normalizedAmount.split('.');
+  return BigInt(`${integer}${fraction}`);
+}
+
+function computeExpenseSharePercentage(
+  userTotalExpense: string,
+  householdTotalExpense: string,
+): string {
+  const householdCents = toBigIntCents(householdTotalExpense);
+
+  if (householdCents === 0n) {
+    return '0.00';
+  }
+
+  const userCents = toBigIntCents(userTotalExpense);
+  const scaledNumerator = userCents * 10000n;
+  const quotient = scaledNumerator / householdCents;
+  const remainder = scaledNumerator % householdCents;
+  const roundedHundredths = remainder * 2n >= householdCents ? quotient + 1n : quotient;
+  const integerPart = roundedHundredths / 100n;
+  const fractionPart = (roundedHundredths % 100n).toString().padStart(2, '0');
+
+  return `${integerPart}.${fractionPart}`;
 }
 
 function toTransactionRecord(transaction: TransactionRow): TransactionRecord {
@@ -443,6 +498,124 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       totalExpense: normalizeMonetaryAggregate(summary?.totalExpense),
       balance: normalizeMonetaryAggregate(summary?.balance),
     };
+  }
+
+  async getUserSummaryAsMember(
+    data: GetHouseholdUserSummaryData,
+  ): Promise<HouseholdUserSummaryEntry[]> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const transactionJoinConditions = [
+      'transaction.household_id = member.household_id',
+      'transaction.created_by = member.user_id',
+    ];
+    const transactionJoinParameters: Record<string, string> = {};
+
+    if (data.startDate !== undefined) {
+      transactionJoinConditions.push('transaction.transaction_date >= :userSummaryStartDate');
+      transactionJoinParameters.userSummaryStartDate = data.startDate;
+    }
+
+    if (data.endDate !== undefined) {
+      transactionJoinConditions.push('transaction.transaction_date <= :userSummaryEndDate');
+      transactionJoinParameters.userSummaryEndDate = data.endDate;
+    }
+
+    const memberRows = await this.dataSource
+      .getRepository(HouseholdMemberEntity)
+      .createQueryBuilder('member')
+      .innerJoin('member.user', 'user')
+      .leftJoin(
+        TransactionEntity,
+        'transaction',
+        transactionJoinConditions.join(' AND '),
+        transactionJoinParameters,
+      )
+      .select('member.user_id', 'userId')
+      .addSelect('user.name', 'name')
+      .addSelect(
+        `COALESCE(
+          SUM(CASE WHEN transaction.type = 'income' THEN transaction.amount ELSE 0 END),
+          0
+        )`,
+        'totalIncome',
+      )
+      .addSelect(
+        `COALESCE(
+          SUM(CASE WHEN transaction.type = 'expense' THEN transaction.amount ELSE 0 END),
+          0
+        )`,
+        'totalExpense',
+      )
+      .addSelect(
+        `COALESCE(
+          SUM(
+            CASE
+              WHEN transaction.type = 'income' THEN transaction.amount
+              WHEN transaction.type = 'expense' THEN -transaction.amount
+              ELSE 0
+            END
+          ),
+          0
+        )`,
+        'balance',
+      )
+      .where('member.household_id = :householdId', { householdId: data.householdId })
+      .groupBy('member.user_id')
+      .addGroupBy('user.name')
+      .orderBy('user.name', 'ASC')
+      .addOrderBy('member.user_id', 'ASC')
+      .getRawMany<HouseholdUserSummaryRow>();
+
+    const totalExpenseQuery = this.dataSource
+      .getRepository(TransactionEntity)
+      .createQueryBuilder('transaction')
+      .select(
+        `COALESCE(
+          SUM(CASE WHEN transaction.type = 'expense' THEN transaction.amount ELSE 0 END),
+          0
+        )`,
+        'totalExpense',
+      )
+      .where('transaction.household_id = :householdId', { householdId: data.householdId });
+
+    if (data.startDate !== undefined) {
+      totalExpenseQuery.andWhere('transaction.transaction_date >= :startDate', {
+        startDate: data.startDate,
+      });
+    }
+
+    if (data.endDate !== undefined) {
+      totalExpenseQuery.andWhere('transaction.transaction_date <= :endDate', {
+        endDate: data.endDate,
+      });
+    }
+
+    const totalExpenseRow = await totalExpenseQuery.getRawOne<HouseholdTotalExpenseRow>();
+    const householdTotalExpense = normalizeMonetaryAggregate(totalExpenseRow?.totalExpense);
+
+    return memberRows.map((row) => {
+      const totalExpense = normalizeMonetaryAggregate(row.totalExpense);
+
+      return {
+        userId: row.userId,
+        name: row.name,
+        totalIncome: normalizeMonetaryAggregate(row.totalIncome),
+        totalExpense,
+        balance: normalizeMonetaryAggregate(row.balance),
+        expenseSharePercentage: computeExpenseSharePercentage(totalExpense, householdTotalExpense),
+      };
+    });
   }
 
   async listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult> {

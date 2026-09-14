@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { jest } from '@jest/globals';
 import type { Express } from 'express';
@@ -35,7 +37,9 @@ import {
   type CreateTransactionData,
   type DeleteTransactionData,
   type GetHouseholdSummaryData,
+  type GetHouseholdUserSummaryData,
   type HouseholdSummary,
+  type HouseholdUserSummaryEntry,
   type ListTransactionsData,
   type ListTransactionsResult,
   type TransactionRecord,
@@ -76,6 +80,22 @@ function formatCents(value: bigint): string {
   const sign = value < 0n ? '-' : '';
   const absolute = value < 0n ? -value : value;
   return `${sign}${absolute / 100n}.${(absolute % 100n).toString().padStart(2, '0')}`;
+}
+
+function computeExpenseSharePercentageForTest(
+  userExpenseCents: bigint,
+  householdExpenseCents: bigint,
+): string {
+  if (householdExpenseCents === 0n) {
+    return '0.00';
+  }
+
+  const scaledNumerator = userExpenseCents * 10000n;
+  const quotient = scaledNumerator / householdExpenseCents;
+  const remainder = scaledNumerator % householdExpenseCents;
+  const roundedHundredths = remainder * 2n >= householdExpenseCents ? quotient + 1n : quotient;
+
+  return `${roundedHundredths / 100n}.${(roundedHundredths % 100n).toString().padStart(2, '0')}`;
 }
 
 class StubUserRepository implements UserRepository {
@@ -154,11 +174,13 @@ class InMemoryTransactionRepository implements TransactionRepository {
   readonly deleteCalls: DeleteTransactionData[] = [];
   readonly listCalls: ListTransactionsData[] = [];
   readonly summaryCalls: GetHouseholdSummaryData[] = [];
+  readonly userSummaryCalls: GetHouseholdUserSummaryData[] = [];
   readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
     householdId: string;
     userId: string;
     role: 'owner' | 'member';
+    name: string;
   }> = [];
   readonly categories = [
     { id: EXPENSE_CATEGORY_ID, householdId: HOUSEHOLD_ID, type: 'expense' as const },
@@ -176,6 +198,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
     private readonly updateError?: Error,
     private readonly deleteError?: Error,
     private readonly summaryError?: Error,
+    private readonly userSummaryError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -312,6 +335,72 @@ class InMemoryTransactionRepository implements TransactionRepository {
       totalExpense: formatCents(totalExpense),
       balance: formatCents(totalIncome - totalExpense),
     };
+  }
+
+  async getUserSummaryAsMember(
+    data: GetHouseholdUserSummaryData,
+  ): Promise<HouseholdUserSummaryEntry[]> {
+    this.userSummaryCalls.push(data);
+
+    if (this.userSummaryError) {
+      throw this.userSummaryError;
+    }
+
+    const requesterMembership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!requesterMembership) {
+      throw new ForbiddenError();
+    }
+
+    const householdMembers = this.memberships.filter(
+      (candidate) => candidate.householdId === data.householdId,
+    );
+
+    const perUser = householdMembers.map((member) => {
+      let totalIncome = 0n;
+      let totalExpense = 0n;
+
+      for (const record of this.records) {
+        if (
+          record.householdId !== data.householdId ||
+          record.createdBy !== member.userId ||
+          (data.startDate !== undefined && record.transactionDate < data.startDate) ||
+          (data.endDate !== undefined && record.transactionDate > data.endDate)
+        ) {
+          continue;
+        }
+
+        if (record.type === 'income') {
+          totalIncome += amountToCents(record.amount);
+        } else {
+          totalExpense += amountToCents(record.amount);
+        }
+      }
+
+      return { userId: member.userId, name: member.name, totalIncome, totalExpense };
+    });
+
+    const householdTotalExpense = perUser.reduce((sum, entry) => sum + entry.totalExpense, 0n);
+
+    return perUser
+      .map((entry) => ({
+        userId: entry.userId,
+        name: entry.name,
+        totalIncome: formatCents(entry.totalIncome),
+        totalExpense: formatCents(entry.totalExpense),
+        balance: formatCents(entry.totalIncome - entry.totalExpense),
+        expenseSharePercentage: computeExpenseSharePercentageForTest(
+          entry.totalExpense,
+          householdTotalExpense,
+        ),
+      }))
+      .sort(
+        (left, right) =>
+          left.name.localeCompare(right.name) || left.userId.localeCompare(right.userId),
+      );
   }
 
   async updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord> {
@@ -457,8 +546,9 @@ function grantMembership(
   role: 'owner' | 'member',
   userId = USER_ID,
   householdId = HOUSEHOLD_ID,
+  name = 'Member',
 ): void {
-  transactions.memberships.push({ householdId, userId, role });
+  transactions.memberships.push({ householdId, userId, role, name });
 }
 
 function createTestContext(
@@ -1730,6 +1820,423 @@ describe('GET /api/households/:householdId/summary', () => {
       error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
     });
     expect(JSON.stringify(response.body)).not.toContain('sensitive summary database details');
+  });
+});
+
+describe('GET /api/households/:householdId/summary/users', () => {
+  const getUserSummary = (
+    app: Express,
+    token: string,
+    query: Record<string, unknown> = {},
+    householdId: string = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .get(`/api/households/${householdId}/summary/users`)
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+  it.each(['owner', 'member'] as const)(
+    'allows an authenticated %s to view the per-user summary',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role, USER_ID, HOUSEHOLD_ID, 'Harry');
+      const token = await createToken(USER_ID);
+
+      const response = await getUserSummary(app, token);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        data: [
+          {
+            userId: USER_ID,
+            name: 'Harry',
+            totalIncome: '0.00',
+            totalExpense: '0.00',
+            balance: '0.00',
+            expenseSharePercentage: '0.00',
+          },
+        ],
+      });
+    },
+  );
+
+  it('returns every household member even when they have no transactions', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(transactions, 'member', OTHER_USER_ID, HOUSEHOLD_ID, 'Ana');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'expense', amount: '100.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(2);
+    expect(response.body.data).toContainEqual({
+      userId: OTHER_USER_ID,
+      name: 'Ana',
+      totalIncome: '0.00',
+      totalExpense: '0.00',
+      balance: '0.00',
+      expenseSharePercentage: '0.00',
+    });
+  });
+
+  it('groups income and expense per createdBy, isolating each member from the others', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(transactions, 'member', OTHER_USER_ID, HOUSEHOLD_ID, 'Ana');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'income', amount: '5000.00' }),
+      storedTransaction({ createdBy: USER_ID, type: 'expense', amount: '2000.00' }),
+      storedTransaction({ createdBy: OTHER_USER_ID, type: 'expense', amount: '1000.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      {
+        userId: OTHER_USER_ID,
+        name: 'Ana',
+        totalIncome: '0.00',
+        totalExpense: '1000.00',
+        balance: '-1000.00',
+        expenseSharePercentage: '33.33',
+      },
+      {
+        userId: USER_ID,
+        name: 'Harry',
+        totalIncome: '5000.00',
+        totalExpense: '2000.00',
+        balance: '3000.00',
+        expenseSharePercentage: '66.67',
+      },
+    ]);
+  });
+
+  it('keeps a member with zero transactions in the requested period instead of dropping the row', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(transactions, 'member', OTHER_USER_ID, HOUSEHOLD_ID, 'Ana');
+    transactions.records.push(
+      storedTransaction({
+        createdBy: USER_ID,
+        type: 'income',
+        amount: '10.00',
+        transactionDate: '2026-09-15',
+      }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token, {
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveLength(2);
+    expect(response.body.data).toContainEqual({
+      userId: OTHER_USER_ID,
+      name: 'Ana',
+      totalIncome: '0.00',
+      totalExpense: '0.00',
+      balance: '0.00',
+      expenseSharePercentage: '0.00',
+    });
+  });
+
+  it('returns 0.00 expenseSharePercentage for every member when the household has no expenses', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(transactions, 'member', OTHER_USER_ID, HOUSEHOLD_ID, 'Ana');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'income', amount: '500.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(
+      response.body.data.map(
+        (entry: { expenseSharePercentage: string }) => entry.expenseSharePercentage,
+      ),
+    ).toEqual(['0.00', '0.00']);
+  });
+
+  it('assigns 100.00 expenseSharePercentage to the only member with expenses', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'expense', amount: '250.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0].expenseSharePercentage).toBe('100.00');
+  });
+
+  it('rounds a repeating-decimal expenseSharePercentage to two places', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(transactions, 'member', OTHER_USER_ID, HOUSEHOLD_ID, 'Ana');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'expense', amount: '1000.00' }),
+      storedTransaction({ createdBy: OTHER_USER_ID, type: 'expense', amount: '2000.00' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    const percentages = response.body.data
+      .map((entry: { expenseSharePercentage: string }) => entry.expenseSharePercentage)
+      .sort();
+    expect(percentages).toEqual(['33.33', '66.67']);
+  });
+
+  it('preserves large monetary values and decimal precision without floating-point conversion', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'income', amount: '999999999900.10' }),
+      storedTransaction({ createdBy: USER_ID, type: 'expense', amount: '0.07' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toEqual({
+      userId: USER_ID,
+      name: 'Harry',
+      totalIncome: '999999999900.10',
+      totalExpense: '0.07',
+      balance: '999999999900.03',
+      expenseSharePercentage: '100.00',
+    });
+  });
+
+  it('includes transactions regardless of status or source', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    transactions.records.push(
+      storedTransaction({
+        createdBy: USER_ID,
+        type: 'expense',
+        amount: '1.00',
+        status: 'pending',
+        dueDate: '2026-09-12',
+      }),
+      storedTransaction({
+        createdBy: USER_ID,
+        type: 'expense',
+        amount: '2.00',
+        status: 'paid',
+        paidAt: NOW,
+        source: 'bank_import',
+      }),
+      storedTransaction({
+        createdBy: USER_ID,
+        type: 'expense',
+        amount: '4.00',
+        status: 'pending',
+        dueDate: null,
+      }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({ totalExpense: '7.00' });
+  });
+
+  it.each([
+    ['only startDate', { startDate: '2026-09-10' }, '14.00'],
+    ['only endDate', { endDate: '2026-09-20' }, '7.00'],
+    ['inclusive startDate and endDate', { startDate: '2026-09-10', endDate: '2026-09-20' }, '6.00'],
+  ] as const)(
+    'applies %s to transactionDate for the per-user totals',
+    async (_caseName, query, totalIncome) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+      transactions.records.push(
+        storedTransaction({
+          createdBy: USER_ID,
+          type: 'income',
+          amount: '1.00',
+          transactionDate: '2026-09-01',
+        }),
+        storedTransaction({
+          createdBy: USER_ID,
+          type: 'income',
+          amount: '2.00',
+          transactionDate: '2026-09-10',
+        }),
+        storedTransaction({
+          createdBy: USER_ID,
+          type: 'income',
+          amount: '4.00',
+          transactionDate: '2026-09-20',
+        }),
+        storedTransaction({
+          createdBy: USER_ID,
+          type: 'income',
+          amount: '8.00',
+          transactionDate: '2026-09-30',
+        }),
+      );
+      const token = await createToken(USER_ID);
+
+      const response = await getUserSummary(app, token, query);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data[0]).toMatchObject({ totalIncome, balance: totalIncome });
+      expect(transactions.userSummaryCalls[0]).toMatchObject(query);
+    },
+  );
+
+  it.each([
+    ['an inverted range', { startDate: '2026-09-20', endDate: '2026-09-10' }],
+    ['an invalid startDate', { startDate: '2026-02-30' }],
+    ['an invalid endDate', { endDate: '13-09-2026' }],
+    ['an unknown query', { status: 'paid' }],
+  ])('returns 400 without querying the repository for %s', async (_caseName, query) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member', USER_ID, HOUSEHOLD_ID, 'Harry');
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token, query);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.userSummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token, {}, 'not-a-uuid');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+    });
+    expect(transactions.userSummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 401 without Authorization', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).get(`/api/households/${HOUSEHOLD_ID}/summary/users`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.userSummaryCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+    ['a nonexistent household', randomUUID(), USER_ID],
+    ['the household creator without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+  ] as const)('returns the same 403 for %s', async (_caseName, householdId, requesterId) => {
+    const { app, transactions } = createTestContext();
+    transactions.records.push(storedTransaction({ createdBy: requesterId }));
+    const token = await createToken(requesterId);
+
+    const response = await getUserSummary(app, token, {}, householdId);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('excludes members and transactions from another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    grantMembership(
+      transactions,
+      'member',
+      OTHER_USER_ID,
+      OTHER_HOUSEHOLD_ID,
+      'Cross Household User',
+    );
+    transactions.records.push(
+      storedTransaction({ createdBy: USER_ID, type: 'income', amount: '10.00' }),
+      storedTransaction({
+        householdId: OTHER_HOUSEHOLD_ID,
+        createdBy: OTHER_USER_ID,
+        type: 'income',
+        amount: '999.00',
+      }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      {
+        userId: USER_ID,
+        name: 'Harry',
+        totalIncome: '10.00',
+        totalExpense: '0.00',
+        balance: '10.00',
+        expenseSharePercentage: '0.00',
+      },
+    ]);
+  });
+
+  it('does not expose email or passwordHash and returns only the documented fields', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'owner', USER_ID, HOUSEHOLD_ID, 'Harry');
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(200);
+    const entry = response.body.data[0];
+    expect(entry).not.toHaveProperty('email');
+    expect(entry).not.toHaveProperty('passwordHash');
+    expect(entry).not.toHaveProperty('role');
+    expect(Object.keys(entry).sort()).toEqual(
+      ['balance', 'expenseSharePercentage', 'name', 'totalExpense', 'totalIncome', 'userId'].sort(),
+    );
+    expect(typeof entry.totalIncome).toBe('string');
+    expect(typeof entry.totalExpense).toBe('string');
+    expect(typeof entry.balance).toBe('string');
+    expect(typeof entry.expenseSharePercentage).toBe('string');
+  });
+
+  it('returns a sanitized 500 for an unexpected user summary error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive user summary database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'member', USER_ID, HOUSEHOLD_ID, 'Harry');
+    const token = await createToken(USER_ID);
+
+    const response = await getUserSummary(app, token);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain('sensitive user summary database details');
   });
 });
 
@@ -3064,6 +3571,362 @@ describe('TypeOrmTransactionRepository', () => {
     expect(householdFindOne).not.toHaveBeenCalled();
     expect(createQueryBuilder).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('aggregates a scoped per-user summary in a single member query plus a single household-total query, without loading transactions or locking', async () => {
+    const events: string[] = [];
+    const memberQuery = {
+      innerJoin: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => {
+        events.push('members');
+        return [
+          {
+            userId: USER_ID,
+            name: 'Harry',
+            totalIncome: '5000.00',
+            totalExpense: '2000.00',
+            balance: '3000.00',
+          },
+          {
+            userId: OTHER_USER_ID,
+            name: 'Ana',
+            totalIncome: '0',
+            totalExpense: '1000.00',
+            balance: '-1000.00',
+          },
+        ];
+      }),
+    };
+    const totalExpenseQuery = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => {
+        events.push('householdTotal');
+        return { totalExpense: '3000.00' };
+      }),
+    };
+    const membershipFindOne = jest.fn(async (options: unknown) => {
+      events.push('membership');
+      return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), options });
+    });
+    const memberCreateQueryBuilder = jest.fn(() => {
+      events.push('memberQueryBuilder');
+      return memberQuery;
+    });
+    const transactionCreateQueryBuilder = jest.fn(() => {
+      events.push('transactionQueryBuilder');
+      return totalExpenseQuery;
+    });
+    const transaction = jest.fn(async () => {
+      throw new Error('getUserSummaryAsMember must not open a transaction');
+    });
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity
+        ? { findOne: membershipFindOne, createQueryBuilder: memberCreateQueryBuilder }
+        : { createQueryBuilder: transactionCreateQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.getUserSummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+    });
+
+    expect(events).toEqual([
+      'membership',
+      'memberQueryBuilder',
+      'members',
+      'transactionQueryBuilder',
+      'householdTotal',
+    ]);
+    expect(membershipFindOne).toHaveBeenCalledWith({
+      select: { id: true },
+      where: {
+        household: { id: HOUSEHOLD_ID },
+        user: { id: USER_ID },
+      },
+    });
+    expect(membershipFindOne.mock.calls[0]?.[0]).not.toHaveProperty('lock');
+
+    expect(memberCreateQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(memberCreateQueryBuilder).toHaveBeenCalledWith('member');
+    expect(memberQuery.innerJoin).toHaveBeenCalledWith('member.user', 'user');
+    expect(memberQuery.leftJoin).toHaveBeenCalledTimes(1);
+    expect(memberQuery.leftJoin.mock.calls[0]?.[0]).toBe(TransactionEntity);
+    expect(memberQuery.leftJoin.mock.calls[0]?.[1]).toBe('transaction');
+    const joinCondition = memberQuery.leftJoin.mock.calls[0]?.[2] as string;
+    expect(joinCondition).toContain('transaction.household_id = member.household_id');
+    expect(joinCondition).toContain('transaction.created_by = member.user_id');
+    expect(joinCondition).toContain('transaction.transaction_date >= :userSummaryStartDate');
+    expect(joinCondition).toContain('transaction.transaction_date <= :userSummaryEndDate');
+    expect(memberQuery.leftJoin.mock.calls[0]?.[3]).toEqual({
+      userSummaryStartDate: '2026-09-01',
+      userSummaryEndDate: '2026-09-30',
+    });
+    expect(memberQuery.select).toHaveBeenCalledWith('member.user_id', 'userId');
+    expect(memberQuery.addSelect.mock.calls[0]).toEqual(['user.name', 'name']);
+    expect(memberQuery.addSelect.mock.calls[1]?.[0]).toContain(
+      "SUM(CASE WHEN transaction.type = 'income'",
+    );
+    expect(memberQuery.addSelect.mock.calls[1]?.[1]).toBe('totalIncome');
+    expect(memberQuery.addSelect.mock.calls[2]?.[0]).toContain(
+      "SUM(CASE WHEN transaction.type = 'expense'",
+    );
+    expect(memberQuery.addSelect.mock.calls[2]?.[1]).toBe('totalExpense');
+    expect(memberQuery.addSelect.mock.calls[3]?.[1]).toBe('balance');
+    expect(memberQuery.where).toHaveBeenCalledWith('member.household_id = :householdId', {
+      householdId: HOUSEHOLD_ID,
+    });
+    expect(memberQuery.andWhere).not.toHaveBeenCalled();
+    expect(memberQuery.groupBy).toHaveBeenCalledWith('member.user_id');
+    expect(memberQuery.addGroupBy).toHaveBeenCalledWith('user.name');
+    expect(memberQuery.orderBy).toHaveBeenCalledWith('user.name', 'ASC');
+    expect(memberQuery.addOrderBy).toHaveBeenCalledWith('member.user_id', 'ASC');
+    expect(memberQuery.getRawMany).toHaveBeenCalledTimes(1);
+    expect(memberQuery).not.toHaveProperty('getMany');
+    expect(memberQuery).not.toHaveProperty('setLock');
+
+    expect(transactionCreateQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(transactionCreateQueryBuilder).toHaveBeenCalledWith('transaction');
+    expect(totalExpenseQuery.where).toHaveBeenCalledWith(
+      'transaction.household_id = :householdId',
+      { householdId: HOUSEHOLD_ID },
+    );
+    expect(totalExpenseQuery.andWhere.mock.calls).toEqual([
+      ['transaction.transaction_date >= :startDate', { startDate: '2026-09-01' }],
+      ['transaction.transaction_date <= :endDate', { endDate: '2026-09-30' }],
+    ]);
+    expect(totalExpenseQuery.getRawOne).toHaveBeenCalledTimes(1);
+    expect(totalExpenseQuery).not.toHaveProperty('setLock');
+
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual([
+      {
+        userId: USER_ID,
+        name: 'Harry',
+        totalIncome: '5000.00',
+        totalExpense: '2000.00',
+        balance: '3000.00',
+        expenseSharePercentage: '66.67',
+      },
+      {
+        userId: OTHER_USER_ID,
+        name: 'Ana',
+        totalIncome: '0.00',
+        totalExpense: '1000.00',
+        balance: '-1000.00',
+        expenseSharePercentage: '33.33',
+      },
+    ]);
+  });
+
+  it('omits period parameters from the transaction join and household-total query when no dates are given', async () => {
+    const memberQuery = {
+      innerJoin: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => []),
+    };
+    const totalExpenseQuery = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => ({ totalExpense: '0' })),
+    };
+    const membershipFindOne = jest.fn(async () => new HouseholdMemberEntity());
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity
+        ? {
+            findOne: membershipFindOne,
+            createQueryBuilder: jest.fn(() => memberQuery),
+          }
+        : { createQueryBuilder: jest.fn(() => totalExpenseQuery) },
+    );
+    const dataSource = { getRepository } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await repository.getUserSummaryAsMember({ householdId: HOUSEHOLD_ID, requesterId: USER_ID });
+
+    const joinCondition = memberQuery.leftJoin.mock.calls[0]?.[2] as string;
+    expect(joinCondition).toBe(
+      'transaction.household_id = member.household_id AND transaction.created_by = member.user_id',
+    );
+    expect(memberQuery.leftJoin.mock.calls[0]?.[3]).toEqual({});
+    expect(totalExpenseQuery.andWhere).not.toHaveBeenCalled();
+  });
+
+  it('does not run per-member queries: exactly one member query and one household-total query regardless of member count', async () => {
+    const memberQuery = {
+      innerJoin: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () =>
+        Array.from({ length: 5 }, (_unused, index) => ({
+          userId: randomUUID(),
+          name: `Member ${index}`,
+          totalIncome: '0',
+          totalExpense: '0',
+          balance: '0',
+        })),
+      ),
+    };
+    const totalExpenseQuery = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => ({ totalExpense: '0' })),
+    };
+    const membershipFindOne = jest.fn(async () => new HouseholdMemberEntity());
+    const memberCreateQueryBuilder = jest.fn(() => memberQuery);
+    const transactionCreateQueryBuilder = jest.fn(() => totalExpenseQuery);
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity
+        ? { findOne: membershipFindOne, createQueryBuilder: memberCreateQueryBuilder }
+        : { createQueryBuilder: transactionCreateQueryBuilder },
+    );
+    const dataSource = { getRepository } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.getUserSummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+    });
+
+    expect(result).toHaveLength(5);
+    expect(memberCreateQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(transactionCreateQueryBuilder).toHaveBeenCalledTimes(1);
+    expect(memberQuery.getRawMany).toHaveBeenCalledTimes(1);
+    expect(totalExpenseQuery.getRawOne).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not query members or the household total when membership is absent', async () => {
+    const membershipFindOne = jest.fn(async () => null);
+    const memberCreateQueryBuilder = jest.fn();
+    const transactionCreateQueryBuilder = jest.fn();
+    const transaction = jest.fn();
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity
+        ? { findOne: membershipFindOne, createQueryBuilder: memberCreateQueryBuilder }
+        : { createQueryBuilder: transactionCreateQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.getUserSummaryAsMember({ householdId: HOUSEHOLD_ID, requesterId: USER_ID }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    expect(membershipFindOne).toHaveBeenCalledTimes(1);
+    expect(memberCreateQueryBuilder).not.toHaveBeenCalled();
+    expect(transactionCreateQueryBuilder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('returns 0.00 for the expenseSharePercentage instead of dividing by zero when the household has no expenses', async () => {
+    const memberQuery = {
+      innerJoin: jest.fn().mockReturnThis(),
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => [
+        {
+          userId: USER_ID,
+          name: 'Harry',
+          totalIncome: '500.00',
+          totalExpense: '0',
+          balance: '500.00',
+        },
+      ]),
+    };
+    const totalExpenseQuery = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn(async () => ({ totalExpense: null })),
+    };
+    const membershipFindOne = jest.fn(async () => new HouseholdMemberEntity());
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity
+        ? { findOne: membershipFindOne, createQueryBuilder: jest.fn(() => memberQuery) }
+        : { createQueryBuilder: jest.fn(() => totalExpenseQuery) },
+    );
+    const dataSource = { getRepository } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.getUserSummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+    });
+
+    expect(result).toEqual([
+      {
+        userId: USER_ID,
+        name: 'Harry',
+        totalIncome: '500.00',
+        totalExpense: '0.00',
+        balance: '500.00',
+        expenseSharePercentage: '0.00',
+      },
+    ]);
+  });
+
+  it('does not use Number, parseFloat, parseInt, or Math in the per-user summary financial path', () => {
+    const sourcePath = fileURLToPath(
+      new URL('../src/repositories/transaction-repository.ts', import.meta.url),
+    );
+    const source = readFileSync(sourcePath, 'utf8');
+    const methodStart = source.indexOf('async getUserSummaryAsMember(');
+    const percentageHelperStart = source.indexOf('function computeExpenseSharePercentage(');
+    const centsHelperStart = source.indexOf('function toBigIntCents(');
+
+    expect(methodStart).toBeGreaterThan(-1);
+    expect(percentageHelperStart).toBeGreaterThan(-1);
+    expect(centsHelperStart).toBeGreaterThan(-1);
+
+    const methodEnd = source.indexOf('\n  async listAsMember(', methodStart);
+    const financialPath = [
+      source.slice(centsHelperStart, centsHelperStart + 400),
+      source.slice(percentageHelperStart, percentageHelperStart + 900),
+      source.slice(methodStart, methodEnd),
+    ].join('\n');
+
+    expect(financialPath).not.toMatch(/\bNumber\(/);
+    expect(financialPath).not.toMatch(/\bparseFloat\(/);
+    expect(financialPath).not.toMatch(/\bparseInt\(/);
+    expect(financialPath).not.toMatch(/\bMath\./);
   });
 
   it('updates the scoped transaction inside a transaction with pessimistic locks and preserves protected fields', async () => {

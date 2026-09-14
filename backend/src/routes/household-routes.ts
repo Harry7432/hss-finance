@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { createAddHouseholdMemberController } from '../controllers/add-household-member-controller.js';
 import { createHouseholdController } from '../controllers/create-household-controller.js';
 import { getHouseholdSummaryController } from '../controllers/get-household-summary-controller.js';
+import { getHouseholdUserSummaryController } from '../controllers/get-household-user-summary-controller.js';
 import { createListHouseholdMembersController } from '../controllers/list-household-members-controller.js';
 import { createListHouseholdsController } from '../controllers/list-households-controller.js';
 import { createAuthenticationMiddleware } from '../middleware/authenticate.js';
@@ -13,6 +14,7 @@ import type { UserRepository } from '../repositories/user-repository.js';
 import { AddHouseholdMemberService } from '../services/add-household-member-service.js';
 import { CreateHouseholdService } from '../services/create-household-service.js';
 import { GetHouseholdSummaryService } from '../services/get-household-summary-service.js';
+import { GetHouseholdUserSummaryService } from '../services/get-household-user-summary-service.js';
 import { ListHouseholdMembersService } from '../services/list-household-members-service.js';
 import { ListHouseholdsService } from '../services/list-households-service.js';
 import type { TodayProvider } from '../services/list-transactions-service.js';
@@ -31,6 +33,7 @@ export function createHouseholdRouter(
   const addHouseholdMember = new AddHouseholdMemberService(households, users);
   const createHousehold = new CreateHouseholdService(households);
   const getHouseholdSummary = new GetHouseholdSummaryService(transactions);
+  const getHouseholdUserSummary = new GetHouseholdUserSummaryService(transactions);
   const listHouseholdMembers = new ListHouseholdMembersService(households);
   const listHouseholds = new ListHouseholdsService(households);
 
@@ -57,6 +60,11 @@ export function createHouseholdRouter(
     '/:householdId/summary',
     createAuthenticationMiddleware(jwtSecret),
     getHouseholdSummaryController(getHouseholdSummary),
+  );
+  householdRouter.get(
+    '/:householdId/summary/users',
+    createAuthenticationMiddleware(jwtSecret),
+    getHouseholdUserSummaryController(getHouseholdUserSummary),
   );
   householdRouter.get(
     '/:householdId/members',

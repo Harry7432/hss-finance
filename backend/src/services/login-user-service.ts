@@ -1,10 +1,10 @@
 import { verify } from 'argon2';
 import { SignJWT } from 'jose';
 
+import { ACCESS_TOKEN_EXPIRATION_SECONDS } from '../config/session.js';
 import { InvalidCredentialsError } from '../errors/invalid-credentials-error.js';
 import type { UserRepository } from '../repositories/user-repository.js';
 
-const ACCESS_TOKEN_EXPIRATION_SECONDS = 3_600;
 const DUMMY_PASSWORD_HASH =
   '$argon2id$v=19$m=19456,p=1,t=2$ZutKfsOZ3OTW4Xq0b7pCgQ$mp+a6VdLtNkWJJl26rMZe17n8QH5il4aDT3UiqmUftE';
 

@@ -27,7 +27,7 @@ describe('apiRequest', () => {
     await expect(apiRequest<{ id: string }>('/auth/me')).resolves.toEqual({ id: 'user-id' });
     expect(fetchMock).toHaveBeenCalledWith(
       'http://localhost:3000/api/auth/me',
-      expect.objectContaining({ credentials: 'same-origin', method: 'GET' }),
+      expect.objectContaining({ credentials: 'include', method: 'GET' }),
     );
 
     const requestOptions = fetchMock.mock.calls[0]?.[1];
@@ -92,7 +92,7 @@ describe('apiRequest', () => {
     );
   });
 
-  it('allows cookie credentials to be enabled per request', async () => {
+  it('allows credentials to be overridden per request', async () => {
     fetchMock.mockResolvedValue(
       new Response(JSON.stringify({ data: null }), {
         headers: { 'Content-Type': 'application/json' },
@@ -100,11 +100,11 @@ describe('apiRequest', () => {
       }),
     );
 
-    await apiRequest('/auth/me', { credentials: 'include' });
+    await apiRequest('/auth/me', { credentials: 'same-origin' });
 
     expect(fetchMock).toHaveBeenCalledWith(
       'http://localhost:3000/api/auth/me',
-      expect.objectContaining({ credentials: 'include' }),
+      expect.objectContaining({ credentials: 'same-origin' }),
     );
   });
 

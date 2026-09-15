@@ -20,10 +20,11 @@ export function createApiRouter(
   transactions: TransactionRepository,
   recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
+  secureCookie = false,
 ): Router {
   const apiRouter = Router();
 
-  apiRouter.use('/auth', createAuthRouter(users, jwtSecret));
+  apiRouter.use('/auth', createAuthRouter(users, jwtSecret, secureCookie));
   apiRouter.use('/health', createHealthRouter(database));
   apiRouter.use(
     '/households',

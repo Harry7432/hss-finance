@@ -1,8 +1,19 @@
 import 'dotenv/config';
 
 const DEFAULT_PORT = 3000;
-const DEFAULT_CORS_ORIGIN = 'http://localhost:5173';
+const DEFAULT_FRONTEND_ORIGIN = 'http://localhost:5173';
 const DEFAULT_DATABASE_URL = 'postgresql://hss_finance:hss_finance_dev@localhost:5433/hss_finance';
+const NODE_ENVIRONMENTS = ['development', 'test', 'production'] as const;
+
+type NodeEnvironment = (typeof NODE_ENVIRONMENTS)[number];
+
+export function parseNodeEnvironment(value: string | undefined): NodeEnvironment {
+  if (!NODE_ENVIRONMENTS.includes(value as NodeEnvironment)) {
+    throw new Error('NODE_ENV must be development, test, or production.');
+  }
+
+  return value as NodeEnvironment;
+}
 
 function parsePort(value: string | undefined): number {
   if (value === undefined) {
@@ -18,21 +29,32 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-function parseCorsOrigin(value: string | undefined): string {
-  const origin = value ?? DEFAULT_CORS_ORIGIN;
+export function parseFrontendOrigin(value: string | undefined, requireHttps = false): string {
+  const origin = value ?? DEFAULT_FRONTEND_ORIGIN;
 
   try {
     const url = new URL(origin);
 
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      (requireHttps && url.protocol !== 'https:') ||
+      url.origin !== origin ||
+      url.username.length > 0 ||
+      url.password.length > 0 ||
+      url.pathname !== '/' ||
+      url.search.length > 0 ||
+      url.hash.length > 0
+    ) {
       throw new Error();
     }
   } catch {
-    throw new Error('CORS_ORIGIN must be a valid HTTP or HTTPS origin.');
+    throw new Error('FRONTEND_ORIGIN must be a valid HTTP or HTTPS origin without a path.');
   }
 
   return origin;
 }
+
+const nodeEnvironment = parseNodeEnvironment(process.env.NODE_ENV);
 
 function parseDatabaseUrl(value: string | undefined): string {
   const databaseUrl = value ?? DEFAULT_DATABASE_URL;
@@ -74,8 +96,13 @@ function parseBoolean(name: string, value: string | undefined, defaultValue: boo
 }
 
 export const env = Object.freeze({
+  nodeEnvironment,
   port: parsePort(process.env.PORT),
-  corsOrigin: parseCorsOrigin(process.env.CORS_ORIGIN),
+  frontendOrigin: parseFrontendOrigin(
+    process.env.FRONTEND_ORIGIN ?? process.env.CORS_ORIGIN,
+    nodeEnvironment === 'production',
+  ),
   databaseUrl: parseDatabaseUrl(process.env.DATABASE_URL),
   databaseLogging: parseBoolean('DATABASE_LOGGING', process.env.DATABASE_LOGGING, false),
+  secureCookies: nodeEnvironment === 'production',
 });

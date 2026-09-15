@@ -55,7 +55,7 @@ export async function apiRequest<T>(
   {
     method = 'GET',
     body,
-    credentials = 'same-origin',
+    credentials = 'include',
     headers: initialHeaders,
     signal,
   }: ApiRequestOptions = {},
@@ -112,7 +112,11 @@ export async function apiRequest<T>(
   const parsedSuccess = successEnvelopeSchema.safeParse(payload);
 
   if (!parsedSuccess.success) {
-    throw new ApiError(response.status, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+    throw new ApiError(
+      response.status,
+      'INVALID_RESPONSE',
+      'O servidor retornou uma resposta inválida.',
+    );
   }
 
   return parsedSuccess.data.data as T;

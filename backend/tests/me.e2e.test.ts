@@ -5,6 +5,7 @@ import { SignJWT } from 'jose';
 import request from 'supertest';
 
 import { createApp } from '../src/app.js';
+import { SESSION_COOKIE_NAME } from '../src/config/session.js';
 import type { DatabaseReadiness } from '../src/database/database-readiness.js';
 import { UserEntity } from '../src/database/entities/user.entity.js';
 import type { CreateUserData, UserRepository } from '../src/repositories/user-repository.js';
@@ -107,6 +108,7 @@ describe('GET /api/auth/me', () => {
     const response = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${token}`);
 
     expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('private, no-store');
     expect(response.body).toEqual({
       data: {
         id: user.id,
@@ -117,6 +119,61 @@ describe('GET /api/auth/me', () => {
     });
     expect(JSON.stringify(response.body)).not.toContain('passwordHash');
     expect(JSON.stringify(response.body)).not.toContain('password_hash');
+  });
+
+  it('returns the authenticated user for a valid session cookie', async () => {
+    const app = createApp(database, new MeUserRepository([user]), TEST_JWT_SECRET);
+    const token = await createToken({ subject: user.id });
+
+    const response = await request(app)
+      .get('/api/auth/me')
+      .set('Cookie', `${SESSION_COOKIE_NAME}=${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('private, no-store');
+    expect(response.body.data.id).toBe(user.id);
+  });
+
+  it('rejects an invalid session cookie without exposing its value', async () => {
+    const app = createApp(database, new MeUserRepository([user]), TEST_JWT_SECRET);
+    const invalidToken = 'invalid-cookie-token';
+
+    const response = await request(app)
+      .get('/api/auth/me')
+      .set('Cookie', `${SESSION_COOKIE_NAME}=${invalidToken}`);
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual(UNAUTHORIZED_RESPONSE);
+    expect(JSON.stringify(response.body)).not.toContain(invalidToken);
+    expect(JSON.stringify(response.body)).not.toContain(SESSION_COOKIE_NAME);
+  });
+
+  it('does not fall back to the cookie when an explicit Bearer token is invalid', async () => {
+    const app = createApp(database, new MeUserRepository([user]), TEST_JWT_SECRET);
+    const cookieToken = await createToken({ subject: user.id });
+
+    const response = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', 'Bearer invalid-token')
+      .set('Cookie', `${SESSION_COOKIE_NAME}=${cookieToken}`);
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual(UNAUTHORIZED_RESPONSE);
+  });
+
+  it('uses Bearer deterministically when Bearer and cookie identify different users', async () => {
+    const otherUser = createUser('other@example.com', user.passwordHash);
+    const app = createApp(database, new MeUserRepository([user, otherUser]), TEST_JWT_SECRET);
+    const bearerToken = await createToken({ subject: otherUser.id });
+    const cookieToken = await createToken({ subject: user.id });
+
+    const response = await request(app)
+      .get('/api/auth/me')
+      .set('Authorization', `Bearer ${bearerToken}`)
+      .set('Cookie', `${SESSION_COOKIE_NAME}=${cookieToken}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.id).toBe(otherUser.id);
   });
 
   it.each([

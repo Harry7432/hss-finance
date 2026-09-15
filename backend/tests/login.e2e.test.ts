@@ -5,6 +5,7 @@ import { jwtVerify } from 'jose';
 import request from 'supertest';
 
 import { createApp } from '../src/app.js';
+import { SESSION_COOKIE_NAME } from '../src/config/session.js';
 import type { DatabaseReadiness } from '../src/database/database-readiness.js';
 import { UserEntity } from '../src/database/entities/user.entity.js';
 import { InvalidCredentialsError } from '../src/errors/invalid-credentials-error.js';
@@ -93,8 +94,17 @@ describe('POST /api/auth/login', () => {
       },
     });
     expect(users.lastLookupEmail).toBe('harry@example.com');
+    expect(response.headers['cache-control']).toBe('no-store');
     expect(JSON.stringify(response.body)).not.toContain('passwordHash');
     expect(JSON.stringify(response.body)).not.toContain('password_hash');
+
+    const sessionCookie = response.headers['set-cookie']?.[0];
+    expect(sessionCookie).toContain(`${SESSION_COOKIE_NAME}=${response.body.data.accessToken}`);
+    expect(sessionCookie).toContain('Max-Age=3600');
+    expect(sessionCookie).toContain('Path=/');
+    expect(sessionCookie).toContain('HttpOnly');
+    expect(sessionCookie).toContain('SameSite=Lax');
+    expect(sessionCookie).not.toContain('Secure');
 
     const { payload, protectedHeader } = await jwtVerify(
       response.body.data.accessToken,
@@ -107,6 +117,25 @@ describe('POST /api/auth/login', () => {
     expect(payload.iat).toEqual(expect.any(Number));
     expect(payload.exp).toEqual(expect.any(Number));
     expect((payload.exp ?? 0) - (payload.iat ?? 0)).toBe(3_600);
+  });
+
+  it('restores and clears the browser session through the cookie jar', async () => {
+    const app = createApp(database, new LoginUserRepository(user), TEST_JWT_SECRET);
+    const browser = request.agent(app);
+
+    const loginResponse = await browser.post('/api/auth/login').send({
+      email: user.email,
+      password: PASSWORD,
+    });
+    const sessionResponse = await browser.get('/api/auth/me');
+    const logoutResponse = await browser.post('/api/auth/logout');
+    const clearedSessionResponse = await browser.get('/api/auth/me');
+
+    expect(loginResponse.status).toBe(200);
+    expect(sessionResponse.status).toBe(200);
+    expect(sessionResponse.body.data.id).toBe(user.id);
+    expect(logoutResponse.status).toBe(204);
+    expect(clearedSessionResponse.status).toBe(401);
   });
 
   it('returns the same 401 response for a wrong password and an unknown email', async () => {
@@ -130,8 +159,13 @@ describe('POST /api/auth/login', () => {
     };
     expect(wrongPasswordResponse.status).toBe(401);
     expect(unknownEmailResponse.status).toBe(401);
+    expect(wrongPasswordResponse.headers['cache-control']).toBe('no-store');
+    expect(unknownEmailResponse.headers['cache-control']).toBe('no-store');
     expect(wrongPasswordResponse.body).toEqual(expectedBody);
     expect(unknownEmailResponse.body).toEqual(expectedBody);
+    expect(wrongPasswordResponse.headers['set-cookie']).toBeUndefined();
+    expect(unknownEmailResponse.headers['set-cookie']).toBeUndefined();
+    expect(JSON.stringify(wrongPasswordResponse.body)).not.toContain(SESSION_COOKIE_NAME);
   });
 
   it('executes password verification against a reusable Argon2id dummy hash', async () => {
@@ -161,6 +195,7 @@ describe('POST /api/auth/login', () => {
     const response = await request(app).post('/api/auth/login').send(payload);
 
     expect(response.status).toBe(400);
+    expect(response.headers['cache-control']).toBe('no-store');
     expect(response.body).toEqual({
       error: {
         code: 'VALIDATION_ERROR',

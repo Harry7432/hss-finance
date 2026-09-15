@@ -1,10 +1,18 @@
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
 
 describe('App', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('presents the HSS Finance foundation screen', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => undefined)),
+    );
     render(<App />);
 
     expect(screen.getByRole('heading', { level: 1, name: 'HSS Finance' })).toBeInTheDocument();

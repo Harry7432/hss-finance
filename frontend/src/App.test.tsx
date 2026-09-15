@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { App } from './App';
 
 describe('App', () => {
-  it('presents the initial HSS Finance screen', () => {
+  it('presents the HSS Finance foundation screen', () => {
     render(<App />);
 
     expect(screen.getByRole('heading', { level: 1, name: 'HSS Finance' })).toBeInTheDocument();

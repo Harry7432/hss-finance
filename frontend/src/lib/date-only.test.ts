@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatDateOnlyPtBR, getTodayInSaoPaulo } from './date-only';
+import {
+  formatDateOnlyPtBR,
+  getCurrentMonthRangeInSaoPaulo,
+  getTodayInSaoPaulo,
+} from './date-only';
 
 describe('formatDateOnlyPtBR', () => {
   it('formats a date-only string as DD/MM/YYYY without using Date parsing', () => {
@@ -28,5 +32,50 @@ describe('getTodayInSaoPaulo', () => {
     const referenceDate = new Date('2026-09-15T15:00:00.000Z');
 
     expect(getTodayInSaoPaulo(referenceDate)).toBe('2026-09-15');
+  });
+});
+
+describe('getCurrentMonthRangeInSaoPaulo', () => {
+  it('returns the first and last day of the current month in São Paulo', () => {
+    const referenceDate = new Date('2026-09-15T15:00:00.000Z');
+
+    expect(getCurrentMonthRangeInSaoPaulo(referenceDate)).toEqual({
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+      label: 'setembro de 2026',
+    });
+  });
+
+  it('does not shift the month near a UTC day boundary (anchored to São Paulo, not UTC)', () => {
+    // 2026-10-01T02:30:00Z is still 2026-09-30 in America/Sao_Paulo.
+    const referenceDate = new Date('2026-10-01T02:30:00.000Z');
+
+    expect(getCurrentMonthRangeInSaoPaulo(referenceDate).endDate).toBe('2026-09-30');
+  });
+
+  it('resolves February in a leap year to 29 days', () => {
+    const referenceDate = new Date('2028-02-10T15:00:00.000Z');
+
+    expect(getCurrentMonthRangeInSaoPaulo(referenceDate)).toEqual({
+      startDate: '2028-02-01',
+      endDate: '2028-02-29',
+      label: 'fevereiro de 2028',
+    });
+  });
+
+  it('resolves February in a non-leap year to 28 days', () => {
+    const referenceDate = new Date('2026-02-10T15:00:00.000Z');
+
+    expect(getCurrentMonthRangeInSaoPaulo(referenceDate).endDate).toBe('2026-02-28');
+  });
+
+  it('resolves December to 31 days', () => {
+    const referenceDate = new Date('2026-12-15T15:00:00.000Z');
+
+    expect(getCurrentMonthRangeInSaoPaulo(referenceDate)).toEqual({
+      startDate: '2026-12-01',
+      endDate: '2026-12-31',
+      label: 'dezembro de 2026',
+    });
   });
 });

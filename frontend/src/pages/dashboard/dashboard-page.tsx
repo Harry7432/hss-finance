@@ -1,4 +1,5 @@
 import { useAuth } from '../../auth/auth-context';
+import { CategorySummary } from '../../components/category-summary/category-summary';
 import { FinancialSummary } from '../../components/financial-summary/financial-summary';
 import { UpcomingPayments } from '../../components/upcoming-payments/upcoming-payments';
 
@@ -19,6 +20,8 @@ export function DashboardPage() {
       <FinancialSummary />
 
       <UpcomingPayments />
+
+      <CategorySummary />
     </div>
   );
 }

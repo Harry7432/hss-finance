@@ -102,6 +102,19 @@ export interface HouseholdUserSummaryEntry {
   expenseSharePercentage: string;
 }
 
+export interface GetHouseholdCategorySummaryData {
+  householdId: string;
+  requesterId: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface HouseholdCategorySummaryEntry {
+  categoryId: string | null;
+  categoryName: string;
+  totalExpense: string;
+}
+
 export interface UpdateTransactionData {
   householdId: string;
   requesterId: string;
@@ -127,6 +140,9 @@ export interface TransactionRepository {
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
   getSummaryAsMember(data: GetHouseholdSummaryData): Promise<HouseholdSummary>;
   getUserSummaryAsMember(data: GetHouseholdUserSummaryData): Promise<HouseholdUserSummaryEntry[]>;
+  getCategorySummaryAsMember(
+    data: GetHouseholdCategorySummaryData,
+  ): Promise<HouseholdCategorySummaryEntry[]>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
   deleteAsMember(data: DeleteTransactionData): Promise<void>;
 }
@@ -165,6 +181,12 @@ interface HouseholdUserSummaryRow {
 }
 
 interface HouseholdTotalExpenseRow {
+  totalExpense: string | null;
+}
+
+interface HouseholdCategorySummaryRow {
+  categoryId: string | null;
+  categoryName: string | null;
   totalExpense: string | null;
 }
 
@@ -662,6 +684,64 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
         expenseSharePercentage: computeExpenseSharePercentage(totalExpense, householdTotalExpense),
       };
     });
+  }
+
+  async getCategorySummaryAsMember(
+    data: GetHouseholdCategorySummaryData,
+  ): Promise<HouseholdCategorySummaryEntry[]> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const query = this.dataSource
+      .getRepository(TransactionEntity)
+      .createQueryBuilder('transaction')
+      .leftJoin('transaction.category', 'category')
+      .select('transaction.category_id', 'categoryId')
+      .addSelect("COALESCE(category.name, 'Sem categoria')", 'categoryName')
+      .addSelect('COALESCE(SUM(transaction.amount), 0)', 'totalExpense')
+      .where('transaction.household_id = :householdId', { householdId: data.householdId })
+      .andWhere('transaction.type = :type', { type: 'expense' })
+      .andWhere(
+        `EXISTS (
+          SELECT 1
+          FROM household_members requester_membership
+          WHERE requester_membership.household_id = transaction.household_id
+            AND requester_membership.user_id = :requesterId
+        )`,
+        { requesterId: data.requesterId },
+      );
+
+    if (data.startDate !== undefined) {
+      query.andWhere('transaction.transaction_date >= :startDate', {
+        startDate: data.startDate,
+      });
+    }
+
+    if (data.endDate !== undefined) {
+      query.andWhere('transaction.transaction_date <= :endDate', { endDate: data.endDate });
+    }
+
+    const rows = await query
+      .groupBy('transaction.category_id')
+      .addGroupBy('category.name')
+      .orderBy('COALESCE(SUM(transaction.amount), 0)', 'DESC')
+      .addOrderBy('transaction.category_id', 'ASC')
+      .getRawMany<HouseholdCategorySummaryRow>();
+
+    return rows.map((row) => ({
+      categoryId: row.categoryId,
+      categoryName: row.categoryName ?? 'Sem categoria',
+      totalExpense: normalizeMonetaryAggregate(row.totalExpense),
+    }));
   }
 
   async listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult> {

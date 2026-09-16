@@ -45,8 +45,10 @@ import {
 import type {
   CreateTransactionData,
   DeleteTransactionData,
+  GetHouseholdCategorySummaryData,
   GetHouseholdSummaryData,
   GetHouseholdUserSummaryData,
+  HouseholdCategorySummaryEntry,
   HouseholdSummary,
   HouseholdUserSummaryEntry,
   ListTransactionsData,
@@ -162,6 +164,12 @@ class StubTransactionRepository implements TransactionRepository {
   async getUserSummaryAsMember(
     _data: GetHouseholdUserSummaryData,
   ): Promise<HouseholdUserSummaryEntry[]> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
+
+  async getCategorySummaryAsMember(
+    _data: GetHouseholdCategorySummaryData,
+  ): Promise<HouseholdCategorySummaryEntry[]> {
     throw new Error('Not implemented in recurring transaction tests.');
   }
 

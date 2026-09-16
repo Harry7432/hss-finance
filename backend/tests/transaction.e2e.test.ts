@@ -46,8 +46,10 @@ import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
   type DeleteTransactionData,
+  type GetHouseholdCategorySummaryData,
   type GetHouseholdSummaryData,
   type GetHouseholdUserSummaryData,
+  type HouseholdCategorySummaryEntry,
   type HouseholdSummary,
   type HouseholdUserSummaryEntry,
   type ListTransactionsData,
@@ -205,6 +207,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
   readonly listCalls: ListTransactionsData[] = [];
   readonly summaryCalls: GetHouseholdSummaryData[] = [];
   readonly userSummaryCalls: GetHouseholdUserSummaryData[] = [];
+  readonly categorySummaryCalls: GetHouseholdCategorySummaryData[] = [];
   readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
     householdId: string;
@@ -213,12 +216,18 @@ class InMemoryTransactionRepository implements TransactionRepository {
     name: string;
   }> = [];
   readonly categories = [
-    { id: EXPENSE_CATEGORY_ID, householdId: HOUSEHOLD_ID, type: 'expense' as const },
-    { id: INCOME_CATEGORY_ID, householdId: HOUSEHOLD_ID, type: 'income' as const },
+    {
+      id: EXPENSE_CATEGORY_ID,
+      householdId: HOUSEHOLD_ID,
+      type: 'expense' as const,
+      name: 'Mercado',
+    },
+    { id: INCOME_CATEGORY_ID, householdId: HOUSEHOLD_ID, type: 'income' as const, name: 'Salário' },
     {
       id: CROSS_HOUSEHOLD_CATEGORY_ID,
       householdId: OTHER_HOUSEHOLD_ID,
       type: 'expense' as const,
+      name: 'Outra família',
     },
   ];
 
@@ -229,6 +238,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
     private readonly deleteError?: Error,
     private readonly summaryError?: Error,
     private readonly userSummaryError?: Error,
+    private readonly categorySummaryError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -467,6 +477,64 @@ class InMemoryTransactionRepository implements TransactionRepository {
         (left, right) =>
           left.name.localeCompare(right.name) || left.userId.localeCompare(right.userId),
       );
+  }
+
+  async getCategorySummaryAsMember(
+    data: GetHouseholdCategorySummaryData,
+  ): Promise<HouseholdCategorySummaryEntry[]> {
+    this.categorySummaryCalls.push(data);
+
+    if (this.categorySummaryError) {
+      throw this.categorySummaryError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const totals = new Map<string | null, bigint>();
+
+    for (const record of this.records) {
+      if (
+        record.householdId !== data.householdId ||
+        record.type !== 'expense' ||
+        (data.startDate !== undefined && record.transactionDate < data.startDate) ||
+        (data.endDate !== undefined && record.transactionDate > data.endDate)
+      ) {
+        continue;
+      }
+
+      totals.set(
+        record.categoryId,
+        (totals.get(record.categoryId) ?? 0n) + amountToCents(record.amount),
+      );
+    }
+
+    const categoryNameById = new Map<string, string>(
+      this.categories.map((category) => [category.id, category.name]),
+    );
+
+    return Array.from(totals.entries())
+      .sort(([leftId, leftCents], [rightId, rightCents]) => {
+        if (rightCents !== leftCents) {
+          return rightCents > leftCents ? 1 : -1;
+        }
+
+        return (leftId ?? '').localeCompare(rightId ?? '');
+      })
+      .map(([categoryId, cents]) => ({
+        categoryId,
+        categoryName:
+          categoryId === null
+            ? 'Sem categoria'
+            : (categoryNameById.get(categoryId) ?? 'Sem categoria'),
+        totalExpense: formatCents(cents),
+      }));
   }
 
   async updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord> {
@@ -2724,6 +2792,275 @@ describe('GET /api/households/:householdId/summary/users', () => {
   });
 });
 
+describe('GET /api/households/:householdId/summary/categories', () => {
+  const getCategorySummary = (
+    app: Express,
+    token: string,
+    query: Record<string, unknown> = {},
+    householdId: string = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .get(`/api/households/${householdId}/summary/categories`)
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+  it.each(['owner', 'member'] as const)(
+    'allows an authenticated %s to view an empty category summary',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role);
+      const token = await createToken(USER_ID);
+
+      const response = await getCategorySummary(app, token);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ data: [] });
+    },
+  );
+
+  it('groups expenses by category and sums each group', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '100.00', categoryId: EXPENSE_CATEGORY_ID }),
+      storedTransaction({ type: 'expense', amount: '50.00', categoryId: EXPENSE_CATEGORY_ID }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: [{ categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '150.00' }],
+    });
+  });
+
+  it('excludes income transactions from the category summary', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '30.00', categoryId: EXPENSE_CATEGORY_ID }),
+      storedTransaction({ type: 'income', amount: '5000.00', categoryId: INCOME_CATEGORY_ID }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '30.00' },
+    ]);
+  });
+
+  it('groups transactions with no category under "Sem categoria"', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '20.00', categoryId: null }),
+      storedTransaction({ type: 'expense', amount: '5.00', categoryId: null }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { categoryId: null, categoryName: 'Sem categoria', totalExpense: '25.00' },
+    ]);
+  });
+
+  it('orders categories by total expense descending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '10.00', categoryId: EXPENSE_CATEGORY_ID }),
+      storedTransaction({ type: 'expense', amount: '90.00', categoryId: null }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(
+      response.body.data.map((entry: { categoryId: string | null }) => entry.categoryId),
+    ).toEqual([null, EXPENSE_CATEGORY_ID]);
+  });
+
+  it('preserves decimal precision without floating-point conversion', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({
+        type: 'expense',
+        amount: '999999999900.10',
+        categoryId: EXPENSE_CATEGORY_ID,
+      }),
+      storedTransaction({ type: 'expense', amount: '0.07', categoryId: EXPENSE_CATEGORY_ID }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '999999999900.17' },
+    ]);
+  });
+
+  it.each([
+    ['only startDate', { startDate: '2026-09-10' }, '14.00'],
+    ['only endDate', { endDate: '2026-09-20' }, '7.00'],
+    ['inclusive startDate and endDate', { startDate: '2026-09-10', endDate: '2026-09-20' }, '6.00'],
+  ] as const)('applies %s to transactionDate', async (_caseName, query, totalExpense) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ amount: '1.00', categoryId: null, transactionDate: '2026-09-01' }),
+      storedTransaction({ amount: '2.00', categoryId: null, transactionDate: '2026-09-10' }),
+      storedTransaction({ amount: '4.00', categoryId: null, transactionDate: '2026-09-20' }),
+      storedTransaction({ amount: '8.00', categoryId: null, transactionDate: '2026-09-30' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token, query);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { categoryId: null, categoryName: 'Sem categoria', totalExpense },
+    ]);
+    expect(transactions.categorySummaryCalls[0]).toMatchObject(query);
+  });
+
+  it.each([
+    ['an inverted range', { startDate: '2026-09-20', endDate: '2026-09-10' }],
+    ['an invalid startDate', { startDate: '2026-02-30' }],
+    ['an invalid endDate', { endDate: '13-09-2026' }],
+    ['an unknown query', { status: 'paid' }],
+  ])('returns 400 without querying the repository for %s', async (_caseName, query) => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token, query);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.categorySummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token, {}, 'not-a-uuid');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+    });
+    expect(transactions.categorySummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 401 without Authorization', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).get(`/api/households/${HOUSEHOLD_ID}/summary/categories`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.categorySummaryCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+    ['a nonexistent household', randomUUID(), USER_ID],
+    ['the household creator without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+  ] as const)('returns the same 403 for %s', async (_caseName, householdId, requesterId) => {
+    const { app, transactions } = createTestContext();
+    transactions.records.push(storedTransaction({ createdBy: requesterId }));
+    const token = await createToken(requesterId);
+
+    const response = await getCategorySummary(app, token, {}, householdId);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('excludes transactions and categories from another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '10.00', categoryId: EXPENSE_CATEGORY_ID }),
+      storedTransaction({
+        householdId: OTHER_HOUSEHOLD_ID,
+        type: 'expense',
+        amount: '999.00',
+        categoryId: CROSS_HOUSEHOLD_CATEGORY_ID,
+      }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '10.00' },
+    ]);
+    expect(transactions.categorySummaryCalls[0]).toEqual({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+    });
+  });
+
+  it('returns only the documented fields', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'expense', amount: '10.00', categoryId: EXPENSE_CATEGORY_ID }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(200);
+    const entry = response.body.data[0];
+    expect(Object.keys(entry).sort()).toEqual(
+      ['categoryId', 'categoryName', 'totalExpense'].sort(),
+    );
+    expect(typeof entry.categoryName).toBe('string');
+    expect(typeof entry.totalExpense).toBe('string');
+  });
+
+  it('returns a sanitized 500 for an unexpected category summary error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive category summary database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getCategorySummary(app, token);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain(
+      'sensitive category summary database details',
+    );
+  });
+});
+
 describe('PATCH /api/households/:householdId/transactions/:transactionId', () => {
   const patch = (
     app: Express,
@@ -4620,7 +4957,7 @@ describe('TypeOrmTransactionRepository', () => {
     expect(percentageHelperStart).toBeGreaterThan(-1);
     expect(centsHelperStart).toBeGreaterThan(-1);
 
-    const methodEnd = source.indexOf('\n  async listAsMember(', methodStart);
+    const methodEnd = source.indexOf('\n  async getCategorySummaryAsMember(', methodStart);
     const financialPath = [
       source.slice(centsHelperStart, centsHelperStart + 400),
       source.slice(percentageHelperStart, percentageHelperStart + 900),
@@ -4631,6 +4968,102 @@ describe('TypeOrmTransactionRepository', () => {
     expect(financialPath).not.toMatch(/\bparseFloat\(/);
     expect(financialPath).not.toMatch(/\bparseInt\(/);
     expect(financialPath).not.toMatch(/\bMath\./);
+  });
+
+  it('aggregates a scoped category summary after membership without loading transactions or locking', async () => {
+    const events: string[] = [];
+    const query = {
+      leftJoin: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn(async () => {
+        events.push('aggregate');
+        return [
+          { categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '150.00' },
+          { categoryId: null, categoryName: 'Sem categoria', totalExpense: '10.5' },
+        ];
+      }),
+    };
+    const membershipFindOne = jest.fn(async (options: unknown) => {
+      events.push('membership');
+      return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), options });
+    });
+    const createQueryBuilder = jest.fn(() => {
+      events.push('queryBuilder');
+      return query;
+    });
+    const transaction = jest.fn(async () => {
+      throw new Error('getCategorySummaryAsMember must not open a transaction');
+    });
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    const result = await repository.getCategorySummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      startDate: '2026-09-01',
+      endDate: '2026-09-30',
+    });
+
+    expect(events).toEqual(['membership', 'queryBuilder', 'aggregate']);
+    expect(membershipFindOne.mock.calls[0]?.[0]).not.toHaveProperty('lock');
+    expect(query.leftJoin).toHaveBeenCalledWith('transaction.category', 'category');
+    expect(query.select).toHaveBeenCalledWith('transaction.category_id', 'categoryId');
+    expect(query.addSelect.mock.calls[0]).toEqual([
+      "COALESCE(category.name, 'Sem categoria')",
+      'categoryName',
+    ]);
+    expect(query.addSelect.mock.calls[1]?.[0]).toContain('SUM(transaction.amount)');
+    expect(query.addSelect.mock.calls[1]?.[1]).toBe('totalExpense');
+    expect(query.where).toHaveBeenCalledWith('transaction.household_id = :householdId', {
+      householdId: HOUSEHOLD_ID,
+    });
+    expect(query.andWhere.mock.calls[0]).toEqual(['transaction.type = :type', { type: 'expense' }]);
+    expect(query.andWhere.mock.calls[1]?.[0]).toContain('FROM household_members');
+    expect(query.andWhere.mock.calls[1]?.[1]).toEqual({ requesterId: USER_ID });
+    expect(query.andWhere.mock.calls.slice(2)).toEqual([
+      ['transaction.transaction_date >= :startDate', { startDate: '2026-09-01' }],
+      ['transaction.transaction_date <= :endDate', { endDate: '2026-09-30' }],
+    ]);
+    expect(query.groupBy).toHaveBeenCalledWith('transaction.category_id');
+    expect(query.addGroupBy).toHaveBeenCalledWith('category.name');
+    expect(query.orderBy).toHaveBeenCalledTimes(1);
+    expect(query.getRawMany).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveProperty('setLock');
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual([
+      { categoryId: EXPENSE_CATEGORY_ID, categoryName: 'Mercado', totalExpense: '150.00' },
+      { categoryId: null, categoryName: 'Sem categoria', totalExpense: '10.50' },
+    ]);
+  });
+
+  it('does not query categories when membership is absent', async () => {
+    const membershipFindOne = jest.fn(async () => null);
+    const createQueryBuilder = jest.fn();
+    const transaction = jest.fn();
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+    );
+    const dataSource = { getRepository, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.getCategorySummaryAsMember({ householdId: HOUSEHOLD_ID, requesterId: USER_ID }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    expect(membershipFindOne).toHaveBeenCalledTimes(1);
+    expect(getRepository).toHaveBeenCalledTimes(1);
+    expect(createQueryBuilder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it('updates the scoped transaction inside a transaction with pessimistic locks and preserves protected fields', async () => {

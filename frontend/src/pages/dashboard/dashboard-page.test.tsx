@@ -1,5 +1,6 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthContext, type AuthContextValue } from '../../auth/auth-context';
 import { DashboardPage } from './dashboard-page';
@@ -18,26 +19,77 @@ function renderDashboard(overrides: Partial<AuthContextValue> = {}) {
     retry: vi.fn(),
     ...overrides,
   };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
   render(
-    <AuthContext value={value}>
-      <DashboardPage />
-    </AuthContext>,
+    <QueryClientProvider client={queryClient}>
+      <AuthContext value={value}>
+        <DashboardPage />
+      </AuthContext>
+    </QueryClientProvider>,
   );
 }
 
 describe('DashboardPage', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
   it('renders the overview heading and a greeting with the user first name', () => {
+    fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+
     renderDashboard();
 
     expect(screen.getByRole('heading', { level: 1, name: 'Visão geral' })).toBeInTheDocument();
     expect(screen.getByText(/Olá, Harry\./)).toBeInTheDocument();
   });
 
-  it('shows a neutral structural placeholder instead of fake financial data', () => {
+  it('never shows a currency figure before the financial summary has loaded', () => {
+    fetchMock.mockImplementation(() => new Promise<Response>(() => undefined));
+
     renderDashboard();
 
-    expect(screen.getByText('Resumo financeiro será exibido aqui.')).toBeInTheDocument();
-    expect(screen.queryByText(/R\$\s?\d/)).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Carregando resumo financeiro');
+    expect(screen.queryByText(/R\$/)).not.toBeInTheDocument();
+  });
+
+  it('renders the real financial summary once households and totals resolve', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: '9c6a6e2e-df3a-4a4c-9d8c-3a2a4a2e0e10',
+                name: 'Casa Sousa',
+                currencyCode: 'BRL',
+                role: 'owner',
+                createdAt: '2026-09-01T12:00:00.000Z',
+              },
+            ],
+          }),
+          { headers: { 'Content-Type': 'application/json' }, status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            data: { totalIncome: '1000.00', totalExpense: '400.00', balance: '600.00' },
+          }),
+          { headers: { 'Content-Type': 'application/json' }, status: 200 },
+        ),
+      );
+
+    renderDashboard();
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Saldo' })).toBeInTheDocument();
+    expect(screen.getByText(/R\$\s600,00/)).toBeInTheDocument();
   });
 });

@@ -115,22 +115,37 @@ describe('app router', () => {
   });
 
   it('leaves a protected route after a successful logout', async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data: {
-              id: '4f8b5484-e733-45f9-9744-a756b1baa1ef',
-              name: 'Harry Sousa',
-              email: 'harry@example.com',
-              createdAt: '2026-09-13T15:00:00.000Z',
-            },
-          }),
-          { headers: { 'Content-Type': 'application/json' }, status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
     const user = userEvent.setup();
+    fetchMock.mockImplementation((input) => {
+      const url = String(input);
+
+      if (url.endsWith('/auth/logout')) {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+
+      if (url.endsWith('/auth/me')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: {
+                id: '4f8b5484-e733-45f9-9744-a756b1baa1ef',
+                name: 'Harry Sousa',
+                email: 'harry@example.com',
+                createdAt: '2026-09-13T15:00:00.000Z',
+              },
+            }),
+            { headers: { 'Content-Type': 'application/json' }, status: 200 },
+          ),
+        );
+      }
+
+      return Promise.resolve(
+        new Response(JSON.stringify({ data: [] }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        }),
+      );
+    });
 
     renderProtectedRoute('/app');
     await screen.findByRole('heading', { name: 'Visão geral' });

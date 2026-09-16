@@ -115,6 +115,19 @@ export interface HouseholdCategorySummaryEntry {
   totalExpense: string;
 }
 
+export interface GetHouseholdMonthlySummaryData {
+  householdId: string;
+  requesterId: string;
+  months: string[];
+}
+
+export interface HouseholdMonthlySummaryEntry {
+  month: string;
+  totalIncome: string;
+  totalExpense: string;
+  balance: string;
+}
+
 export interface UpdateTransactionData {
   householdId: string;
   requesterId: string;
@@ -143,6 +156,9 @@ export interface TransactionRepository {
   getCategorySummaryAsMember(
     data: GetHouseholdCategorySummaryData,
   ): Promise<HouseholdCategorySummaryEntry[]>;
+  getMonthlySummaryAsMember(
+    data: GetHouseholdMonthlySummaryData,
+  ): Promise<HouseholdMonthlySummaryEntry[]>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
   deleteAsMember(data: DeleteTransactionData): Promise<void>;
 }
@@ -188,6 +204,13 @@ interface HouseholdCategorySummaryRow {
   categoryId: string | null;
   categoryName: string | null;
   totalExpense: string | null;
+}
+
+interface HouseholdMonthlySummaryRow {
+  month: string;
+  totalIncome: string | null;
+  totalExpense: string | null;
+  balance: string | null;
 }
 
 function normalizeMonetaryAggregate(value: string | null | undefined): string {
@@ -741,6 +764,67 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       categoryId: row.categoryId,
       categoryName: row.categoryName ?? 'Sem categoria',
       totalExpense: normalizeMonetaryAggregate(row.totalExpense),
+    }));
+  }
+
+  async getMonthlySummaryAsMember(
+    data: GetHouseholdMonthlySummaryData,
+  ): Promise<HouseholdMonthlySummaryEntry[]> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const rows = await this.dataSource.query<HouseholdMonthlySummaryRow[]>(
+      `
+        SELECT
+          month_series.month AS month,
+          COALESCE(
+            SUM(CASE WHEN transaction.type = 'income' THEN transaction.amount ELSE 0 END),
+            0
+          ) AS "totalIncome",
+          COALESCE(
+            SUM(CASE WHEN transaction.type = 'expense' THEN transaction.amount ELSE 0 END),
+            0
+          ) AS "totalExpense",
+          COALESCE(
+            SUM(
+              CASE
+                WHEN transaction.type = 'income' THEN transaction.amount
+                WHEN transaction.type = 'expense' THEN -transaction.amount
+                ELSE 0
+              END
+            ),
+            0
+          ) AS "balance"
+        FROM unnest($2::text[]) AS month_series(month)
+        LEFT JOIN transactions transaction
+          ON transaction.household_id = $1
+          AND to_char(transaction.transaction_date, 'YYYY-MM') = month_series.month
+          AND EXISTS (
+            SELECT 1
+            FROM household_members requester_membership
+            WHERE requester_membership.household_id = transaction.household_id
+              AND requester_membership.user_id = $3
+          )
+        GROUP BY month_series.month
+        ORDER BY month_series.month ASC
+      `,
+      [data.householdId, data.months, data.requesterId],
+    );
+
+    return rows.map((row) => ({
+      month: row.month,
+      totalIncome: normalizeMonetaryAggregate(row.totalIncome),
+      totalExpense: normalizeMonetaryAggregate(row.totalExpense),
+      balance: normalizeMonetaryAggregate(row.balance),
     }));
   }
 

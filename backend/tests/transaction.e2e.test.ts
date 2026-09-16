@@ -47,9 +47,11 @@ import {
   type CreateTransactionData,
   type DeleteTransactionData,
   type GetHouseholdCategorySummaryData,
+  type GetHouseholdMonthlySummaryData,
   type GetHouseholdSummaryData,
   type GetHouseholdUserSummaryData,
   type HouseholdCategorySummaryEntry,
+  type HouseholdMonthlySummaryEntry,
   type HouseholdSummary,
   type HouseholdUserSummaryEntry,
   type ListTransactionsData,
@@ -208,6 +210,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
   readonly summaryCalls: GetHouseholdSummaryData[] = [];
   readonly userSummaryCalls: GetHouseholdUserSummaryData[] = [];
   readonly categorySummaryCalls: GetHouseholdCategorySummaryData[] = [];
+  readonly monthlySummaryCalls: GetHouseholdMonthlySummaryData[] = [];
   readonly updateCalls: UpdateTransactionData[] = [];
   readonly memberships: Array<{
     householdId: string;
@@ -239,6 +242,7 @@ class InMemoryTransactionRepository implements TransactionRepository {
     private readonly summaryError?: Error,
     private readonly userSummaryError?: Error,
     private readonly categorySummaryError?: Error,
+    private readonly monthlySummaryError?: Error,
   ) {}
 
   async createAsMember(data: CreateTransactionData): Promise<TransactionRecord> {
@@ -535,6 +539,49 @@ class InMemoryTransactionRepository implements TransactionRepository {
             : (categoryNameById.get(categoryId) ?? 'Sem categoria'),
         totalExpense: formatCents(cents),
       }));
+  }
+
+  async getMonthlySummaryAsMember(
+    data: GetHouseholdMonthlySummaryData,
+  ): Promise<HouseholdMonthlySummaryEntry[]> {
+    this.monthlySummaryCalls.push(data);
+
+    if (this.monthlySummaryError) {
+      throw this.monthlySummaryError;
+    }
+
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    return data.months.map((month) => {
+      let totalIncome = 0n;
+      let totalExpense = 0n;
+
+      for (const record of this.records) {
+        if (record.householdId !== data.householdId || !record.transactionDate.startsWith(month)) {
+          continue;
+        }
+
+        if (record.type === 'income') {
+          totalIncome += amountToCents(record.amount);
+        } else {
+          totalExpense += amountToCents(record.amount);
+        }
+      }
+
+      return {
+        month,
+        totalIncome: formatCents(totalIncome),
+        totalExpense: formatCents(totalExpense),
+        balance: formatCents(totalIncome - totalExpense),
+      };
+    });
   }
 
   async updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord> {
@@ -3061,6 +3108,251 @@ describe('GET /api/households/:householdId/summary/categories', () => {
   });
 });
 
+describe('GET /api/households/:householdId/summary/monthly', () => {
+  const getMonthlySummary = (
+    app: Express,
+    token: string,
+    query: Record<string, unknown> = {},
+    householdId: string = HOUSEHOLD_ID,
+  ) =>
+    request(app)
+      .get(`/api/households/${householdId}/summary/monthly`)
+      .query(query)
+      .set('Authorization', `Bearer ${token}`);
+
+  const EXPECTED_MONTHS = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+
+  it.each(['owner', 'member'] as const)(
+    'allows an authenticated %s to view an empty monthly summary with all six months zeroed',
+    async (role) => {
+      const { app, transactions } = createTestContext();
+      grantMembership(transactions, role);
+      const token = await createToken(USER_ID);
+
+      const response = await getMonthlySummary(app, token);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        data: EXPECTED_MONTHS.map((month) => ({
+          month,
+          totalIncome: '0.00',
+          totalExpense: '0.00',
+          balance: '0.00',
+        })),
+      });
+    },
+  );
+
+  it('includes the current month and orders the six months chronologically ascending', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((entry: { month: string }) => entry.month)).toEqual(
+      EXPECTED_MONTHS,
+    );
+  });
+
+  it('aggregates income, expense and balance per month, filling months without movement with zeros', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '1000.00', transactionDate: '2026-09-01' }),
+      storedTransaction({ type: 'expense', amount: '700.00', transactionDate: '2026-09-13' }),
+      storedTransaction({ type: 'income', amount: '500.00', transactionDate: '2026-08-05' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      { month: '2026-04', totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      { month: '2026-05', totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      { month: '2026-06', totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      { month: '2026-07', totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      { month: '2026-08', totalIncome: '500.00', totalExpense: '0.00', balance: '500.00' },
+      { month: '2026-09', totalIncome: '1000.00', totalExpense: '700.00', balance: '300.00' },
+    ]);
+  });
+
+  it('excludes transactions outside the six-month window', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '999.00', transactionDate: '2026-03-31' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(
+      response.body.data.every((entry: { totalIncome: string }) => entry.totalIncome === '0.00'),
+    ).toBe(true);
+  });
+
+  it('preserves decimal precision without floating-point conversion', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({
+        type: 'income',
+        amount: '999999999900.10',
+        transactionDate: '2026-09-01',
+      }),
+      storedTransaction({ type: 'income', amount: '0.07', transactionDate: '2026-09-05' }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    const september = response.body.data.find(
+      (entry: { month: string }) => entry.month === '2026-09',
+    );
+    expect(september).toEqual({
+      month: '2026-09',
+      totalIncome: '999999999900.17',
+      totalExpense: '0.00',
+      balance: '999999999900.17',
+    });
+  });
+
+  it('returns 400 for an unknown query parameter', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token, { months: '12' });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request query' },
+    });
+    expect(transactions.monthlySummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 400 for an invalid household UUID', async () => {
+    const { app, transactions } = createTestContext();
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token, {}, 'not-a-uuid');
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: 'Invalid request parameter' },
+    });
+    expect(transactions.monthlySummaryCalls).toHaveLength(0);
+  });
+
+  it('returns 401 without Authorization', async () => {
+    const { app, transactions } = createTestContext();
+
+    const response = await request(app).get(`/api/households/${HOUSEHOLD_ID}/summary/monthly`);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHORIZED');
+    expect(transactions.monthlySummaryCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+    ['a nonexistent household', randomUUID(), USER_ID],
+  ] as const)('returns the same 403 for %s', async (_caseName, householdId, requesterId) => {
+    const { app, transactions } = createTestContext();
+    transactions.records.push(storedTransaction({ createdBy: requesterId }));
+    const token = await createToken(requesterId);
+
+    const response = await getMonthlySummary(app, token, {}, householdId);
+
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      error: { code: 'FORBIDDEN', message: 'Access denied' },
+    });
+  });
+
+  it('excludes transactions from another household', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    transactions.records.push(
+      storedTransaction({ type: 'income', amount: '10.00', transactionDate: '2026-09-01' }),
+      storedTransaction({
+        householdId: OTHER_HOUSEHOLD_ID,
+        type: 'income',
+        amount: '999.00',
+        transactionDate: '2026-09-01',
+      }),
+    );
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    const september = response.body.data.find(
+      (entry: { month: string }) => entry.month === '2026-09',
+    );
+    expect(september.totalIncome).toBe('10.00');
+    expect(transactions.monthlySummaryCalls[0]).toEqual({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      months: EXPECTED_MONTHS,
+    });
+  });
+
+  it('queries the repository exactly once for the whole window', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    expect(transactions.monthlySummaryCalls).toHaveLength(1);
+  });
+
+  it('returns only the documented fields', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(200);
+    const entry = response.body.data[0];
+    expect(Object.keys(entry).sort()).toEqual(['balance', 'month', 'totalExpense', 'totalIncome']);
+  });
+
+  it('returns a sanitized 500 for an unexpected monthly summary error', async () => {
+    const transactions = new InMemoryTransactionRepository(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      new Error('sensitive monthly summary database details'),
+    );
+    const { app } = createTestContext(transactions);
+    grantMembership(transactions, 'member');
+    const token = await createToken(USER_ID);
+
+    const response = await getMonthlySummary(app, token);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: { code: 'INTERNAL_SERVER_ERROR', message: 'Internal server error' },
+    });
+    expect(JSON.stringify(response.body)).not.toContain(
+      'sensitive monthly summary database details',
+    );
+  });
+});
+
 describe('PATCH /api/households/:householdId/transactions/:transactionId', () => {
   const patch = (
     app: Express,
@@ -5063,6 +5355,73 @@ describe('TypeOrmTransactionRepository', () => {
     expect(membershipFindOne).toHaveBeenCalledTimes(1);
     expect(getRepository).toHaveBeenCalledTimes(1);
     expect(createQueryBuilder).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it('aggregates a scoped monthly summary via a single raw query after membership, without loading transactions, locking, or opening a transaction', async () => {
+    const events: string[] = [];
+    const membershipFindOne = jest.fn(async (options: unknown) => {
+      events.push('membership');
+      return Object.assign(new HouseholdMemberEntity(), { id: randomUUID(), options });
+    });
+    const query = jest.fn(async (_sql: string, _parameters: unknown[]) => {
+      events.push('query');
+      return [
+        { month: '2026-04', totalIncome: '0', totalExpense: '0', balance: '0' },
+        { month: '2026-09', totalIncome: '1000.5', totalExpense: '400', balance: '600.5' },
+      ];
+    });
+    const transaction = jest.fn(async () => {
+      throw new Error('getMonthlySummaryAsMember must not open a transaction');
+    });
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : {},
+    );
+    const dataSource = { getRepository, query, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+    const months = ['2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09'];
+
+    const result = await repository.getMonthlySummaryAsMember({
+      householdId: HOUSEHOLD_ID,
+      requesterId: USER_ID,
+      months,
+    });
+
+    expect(events).toEqual(['membership', 'query']);
+    expect(membershipFindOne.mock.calls[0]?.[0]).not.toHaveProperty('lock');
+    expect(query).toHaveBeenCalledTimes(1);
+    const [sql, parameters] = query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('unnest($2::text[])');
+    expect(sql).toContain('GROUP BY month_series.month');
+    expect(sql).toContain('LEFT JOIN transactions');
+    expect(parameters).toEqual([HOUSEHOLD_ID, months, USER_ID]);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(result).toEqual([
+      { month: '2026-04', totalIncome: '0.00', totalExpense: '0.00', balance: '0.00' },
+      { month: '2026-09', totalIncome: '1000.50', totalExpense: '400.00', balance: '600.50' },
+    ]);
+  });
+
+  it('does not query the monthly summary when membership is absent', async () => {
+    const membershipFindOne = jest.fn(async () => null);
+    const query = jest.fn();
+    const transaction = jest.fn();
+    const getRepository = jest.fn((entity: unknown) =>
+      entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : {},
+    );
+    const dataSource = { getRepository, query, transaction } as unknown as DataSource;
+    const repository = new TypeOrmTransactionRepository(dataSource);
+
+    await expect(
+      repository.getMonthlySummaryAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        months: ['2026-09'],
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+
+    expect(membershipFindOne).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
     expect(transaction).not.toHaveBeenCalled();
   });
 

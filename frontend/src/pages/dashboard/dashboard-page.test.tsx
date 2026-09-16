@@ -61,6 +61,7 @@ describe('DashboardPage', () => {
       expect.stringContaining('Carregando resumo financeiro'),
       expect.stringContaining('Carregando próximos vencimentos'),
       expect.stringContaining('Carregando gastos por categoria'),
+      expect.stringContaining('Carregando evolução mensal'),
     ]);
     expect(screen.queryByText(/R\$/)).not.toBeInTheDocument();
   });
@@ -89,6 +90,15 @@ describe('DashboardPage', () => {
       }
 
       if (url.includes('/summary/categories')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            headers: { 'Content-Type': 'application/json' },
+            status: 200,
+          }),
+        );
+      }
+
+      if (url.includes('/summary/monthly')) {
         return Promise.resolve(
           new Response(JSON.stringify({ data: [] }), {
             headers: { 'Content-Type': 'application/json' },
@@ -132,5 +142,11 @@ describe('DashboardPage', () => {
       await screen.findByRole('heading', { level: 2, name: 'Gastos por categoria' }),
     ).toBeInTheDocument();
     expect(screen.getByText('Nenhuma despesa registrada neste mês.')).toBeInTheDocument();
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Evolução mensal' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Nenhuma movimentação registrada nos últimos 6 meses.'),
+    ).toBeInTheDocument();
   });
 });

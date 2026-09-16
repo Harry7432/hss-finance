@@ -13,7 +13,7 @@ const authenticatedUser = {
   createdAt: '2026-09-13T15:00:00.000Z',
 };
 
-function renderAppShell(overrides: Partial<AuthContextValue> = {}) {
+function renderAppShell(overrides: Partial<AuthContextValue> = {}, initialPath = '/app') {
   const logout = vi.fn().mockResolvedValue(undefined);
   const value: AuthContextValue = {
     status: 'authenticated',
@@ -28,10 +28,15 @@ function renderAppShell(overrides: Partial<AuthContextValue> = {}) {
     [
       {
         element: <AppShell />,
-        children: [{ path: 'app', element: <p>Conteúdo do dashboard</p> }],
+        children: [
+          { path: 'app', element: <p>Conteúdo do dashboard</p> },
+          { path: 'app/transactions', element: <p>Conteúdo de lançamentos</p> },
+          { path: 'app/categories', element: <p>Conteúdo de categorias</p> },
+          { path: 'app/family', element: <p>Conteúdo de família</p> },
+        ],
       },
     ],
-    { initialEntries: ['/app'] },
+    { initialEntries: [initialPath] },
   );
 
   render(
@@ -57,6 +62,30 @@ describe('AppShell', () => {
     renderAppShell();
 
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('shows the header title for the dashboard route', () => {
+    renderAppShell({}, '/app');
+
+    expect(screen.getByRole('banner')).toHaveTextContent('Dashboard');
+  });
+
+  it('shows the header title for the transactions route', () => {
+    renderAppShell({}, '/app/transactions');
+
+    expect(screen.getByRole('banner')).toHaveTextContent('Lançamentos');
+  });
+
+  it('shows the header title for the categories route', () => {
+    renderAppShell({}, '/app/categories');
+
+    expect(screen.getByRole('banner')).toHaveTextContent('Categorias');
+  });
+
+  it('shows the header title for the family route', () => {
+    renderAppShell({}, '/app/family');
+
+    expect(screen.getByRole('banner')).toHaveTextContent('Família');
   });
 
   it('renders a working link to the family route', () => {

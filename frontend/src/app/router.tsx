@@ -1,7 +1,8 @@
 import { createBrowserRouter, Outlet, type RouteObject } from 'react-router';
 
 import { RequireAuth } from '../auth/require-auth';
-import { AuthenticatedPage } from '../pages/authenticated/authenticated-page';
+import { AppShell } from '../components/app-shell/app-shell';
+import { DashboardPage } from '../pages/dashboard/dashboard-page';
 import { HomePage } from '../pages/home/home-page';
 import { LoginPage } from '../pages/login/login-page';
 import { NotFoundPage } from '../pages/not-found/not-found-page';
@@ -25,8 +26,13 @@ export const appRoutes: RouteObject[] = [
         element: <RequireAuth />,
         children: [
           {
-            path: 'app',
-            element: <AuthenticatedPage />,
+            element: <AppShell />,
+            children: [
+              {
+                path: 'app',
+                element: <DashboardPage />,
+              },
+            ],
           },
         ],
       },

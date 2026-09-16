@@ -91,7 +91,7 @@ describe('app router', () => {
 
     renderProtectedRoute('/app');
 
-    expect(await screen.findByRole('heading', { name: 'Área autenticada' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Visão geral' })).toBeInTheDocument();
   });
 
   it('redirects an authenticated user away from the login route', async () => {
@@ -111,7 +111,7 @@ describe('app router', () => {
 
     renderProtectedRoute('/login');
 
-    expect(await screen.findByRole('heading', { name: 'Área autenticada' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Visão geral' })).toBeInTheDocument();
   });
 
   it('leaves a protected route after a successful logout', async () => {
@@ -133,7 +133,7 @@ describe('app router', () => {
     const user = userEvent.setup();
 
     renderProtectedRoute('/app');
-    await screen.findByRole('heading', { name: 'Área autenticada' });
+    await screen.findByRole('heading', { name: 'Visão geral' });
     await user.click(screen.getByRole('button', { name: 'Sair' }));
 
     expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument();

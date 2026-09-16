@@ -19,6 +19,12 @@ export interface LoginInput {
   password: string;
 }
 
+export interface RegisterInput {
+  name: string;
+  email: string;
+  password: string;
+}
+
 export async function getCurrentUser(): Promise<AuthUser> {
   const user = await apiRequest<unknown>('/auth/me');
   const parsedUser = authUserSchema.safeParse(user);
@@ -32,6 +38,15 @@ export async function getCurrentUser(): Promise<AuthUser> {
 
 export async function login(input: LoginInput): Promise<void> {
   await apiRequest('/auth/login', { method: 'POST', body: input });
+}
+
+/**
+ * Registration does not authenticate: the backend only persists the account
+ * and returns its public data, with no session cookie. The caller is
+ * responsible for sending the user to /login afterwards.
+ */
+export async function register(input: RegisterInput): Promise<void> {
+  await apiRequest('/auth/register', { method: 'POST', body: input });
 }
 
 export function logout(): Promise<void> {

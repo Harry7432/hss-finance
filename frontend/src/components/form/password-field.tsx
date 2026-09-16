@@ -5,10 +5,12 @@ import { inputBaseClassName } from './field-styles';
 
 interface PasswordFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> {
   label: string;
+  error?: string;
 }
 
-export function PasswordField({ label, id, className, ...inputProps }: PasswordFieldProps) {
+export function PasswordField({ label, id, className, error, ...inputProps }: PasswordFieldProps) {
   const generatedId = useId();
+  const errorId = useId();
   const inputId = id ?? generatedId;
   const [isVisible, setIsVisible] = useState(false);
 
@@ -23,6 +25,8 @@ export function PasswordField({ label, id, className, ...inputProps }: PasswordF
           type={isVisible ? 'text' : 'password'}
           className={cn(inputBaseClassName, 'pr-12', className)}
           {...inputProps}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
         />
         <button
           type="button"
@@ -38,6 +42,11 @@ export function PasswordField({ label, id, className, ...inputProps }: PasswordF
           {isVisible ? 'Ocultar' : 'Ver'}
         </button>
       </div>
+      {error ? (
+        <p id={errorId} className="text-xs font-medium text-expense">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

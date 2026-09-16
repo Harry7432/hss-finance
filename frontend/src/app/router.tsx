@@ -6,6 +6,7 @@ import { DashboardPage } from '../pages/dashboard/dashboard-page';
 import { HomePage } from '../pages/home/home-page';
 import { LoginPage } from '../pages/login/login-page';
 import { NotFoundPage } from '../pages/not-found/not-found-page';
+import { RegisterPage } from '../pages/register/register-page';
 import { RouteErrorPage } from '../pages/route-error/route-error-page';
 
 export const appRoutes: RouteObject[] = [
@@ -21,6 +22,10 @@ export const appRoutes: RouteObject[] = [
       {
         path: 'login',
         element: <LoginPage />,
+      },
+      {
+        path: 'register',
+        element: <RegisterPage />,
       },
       {
         element: <RequireAuth />,

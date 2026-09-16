@@ -1,12 +1,16 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { AuthContext, type AuthContextValue } from '../../auth/auth-context';
 import { ApiError } from '../../lib/api-error';
 import { LoginForm } from './login-form';
 
-function renderWithAuth(overrides: Partial<AuthContextValue> = {}) {
+function renderWithAuth(
+  overrides: Partial<AuthContextValue> = {},
+  formProps: { registrationSuccess?: boolean } = {},
+) {
   const login = vi.fn().mockResolvedValue(undefined);
   const value: AuthContextValue = {
     status: 'unauthenticated',
@@ -18,9 +22,11 @@ function renderWithAuth(overrides: Partial<AuthContextValue> = {}) {
   };
 
   render(
-    <AuthContext value={value}>
-      <LoginForm />
-    </AuthContext>,
+    <MemoryRouter>
+      <AuthContext value={value}>
+        <LoginForm {...formProps} />
+      </AuthContext>
+    </MemoryRouter>,
   );
 
   return { login };
@@ -125,11 +131,33 @@ describe('LoginForm', () => {
     );
   });
 
-  it('keeps the password recovery action disabled and free of a real link', () => {
+  it('keeps the password recovery action disabled and without a real link', () => {
     renderWithAuth();
 
     const recoveryButton = screen.getByRole('button', { name: 'Esqueci minha senha (em breve)' });
     expect(recoveryButton).toBeDisabled();
-    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('links to /register to create an account', () => {
+    renderWithAuth();
+
+    const registerLink = screen.getByRole('link', { name: 'Criar conta' });
+    expect(registerLink).toHaveAttribute('href', '/register');
+  });
+
+  it('does not show the registration success message by default', () => {
+    renderWithAuth();
+
+    expect(
+      screen.queryByText('Cadastro concluído! Faça login para continuar.'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows an accessible success status after a successful registration', () => {
+    renderWithAuth({}, { registrationSuccess: true });
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Cadastro concluído! Faça login para continuar.',
+    );
   });
 });

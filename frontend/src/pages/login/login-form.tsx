@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { Link } from 'react-router';
 
 import { PasswordField } from '../../components/form/password-field';
 import { TextField } from '../../components/form/text-field';
@@ -13,7 +14,11 @@ function resolveErrorMessage(error: unknown): string {
   return 'Não foi possível entrar agora. Tente novamente em instantes.';
 }
 
-export function LoginForm() {
+interface LoginFormProps {
+  registrationSuccess?: boolean;
+}
+
+export function LoginForm({ registrationSuccess = false }: LoginFormProps) {
   const auth = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -46,6 +51,15 @@ export function LoginForm() {
   return (
     <form className="flex flex-col gap-5" onSubmit={handleSubmit} noValidate>
       <h1 className="text-2xl font-semibold tracking-[-0.01em] text-ink">Entrar</h1>
+
+      {registrationSuccess ? (
+        <p
+          role="status"
+          className="rounded-lg border border-income/30 bg-income/10 px-4 py-3 text-sm font-medium text-income"
+        >
+          Cadastro concluído! Faça login para continuar.
+        </p>
+      ) : null}
 
       <fieldset disabled={isSubmitting} className="flex flex-col gap-5 border-0 p-0">
         <legend className="sr-only">Dados de acesso</legend>
@@ -94,7 +108,15 @@ export function LoginForm() {
         >
           Esqueci minha senha (em breve)
         </button>
-        <p>Ainda não tem uma conta? Cadastro em breve.</p>
+        <p>
+          Não tem uma conta?{' '}
+          <Link
+            to="/register"
+            className="font-medium text-brand underline-offset-4 hover:underline"
+          >
+            Criar conta
+          </Link>
+        </p>
       </div>
     </form>
   );

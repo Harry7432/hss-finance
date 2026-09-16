@@ -1,19 +1,13 @@
-import { Navigate, useLocation } from 'react-router';
+import { Navigate } from 'react-router';
 
 import { useAuth } from '../../auth/auth-context';
-import { AuthShell } from './auth-shell';
-import { LoginForm } from './login-form';
+import { AuthShell } from '../login/auth-shell';
+import { RegisterForm } from './register-form';
 
-const SUBTITLE = 'Acesse sua conta para continuar.';
+const SUBTITLE = 'Crie sua conta para começar a organizar as finanças da sua família.';
 
-interface LoginLocationState {
-  registered?: boolean;
-}
-
-export function LoginPage() {
+export function RegisterPage() {
   const auth = useAuth();
-  const location = useLocation();
-  const registered = Boolean((location.state as LoginLocationState | null)?.registered);
 
   if (auth.status === 'authenticated') {
     return <Navigate to="/app" replace />;
@@ -48,7 +42,7 @@ export function LoginPage() {
 
   return (
     <AuthShell subtitle={SUBTITLE}>
-      <LoginForm registrationSuccess={registered} />
+      <RegisterForm />
     </AuthShell>
   );
 }

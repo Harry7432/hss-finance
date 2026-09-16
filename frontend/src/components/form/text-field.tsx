@@ -5,10 +5,12 @@ import { inputBaseClassName } from './field-styles';
 
 interface TextFieldProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
+  error?: string;
 }
 
-export function TextField({ label, id, className, ...inputProps }: TextFieldProps) {
+export function TextField({ label, id, className, error, ...inputProps }: TextFieldProps) {
   const generatedId = useId();
+  const errorId = useId();
   const inputId = id ?? generatedId;
 
   return (
@@ -16,7 +18,18 @@ export function TextField({ label, id, className, ...inputProps }: TextFieldProp
       <label htmlFor={inputId} className="text-sm font-medium text-ink">
         {label}
       </label>
-      <input id={inputId} className={cn(inputBaseClassName, className)} {...inputProps} />
+      <input
+        id={inputId}
+        className={cn(inputBaseClassName, className)}
+        {...inputProps}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+      />
+      {error ? (
+        <p id={errorId} className="text-xs font-medium text-expense">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }

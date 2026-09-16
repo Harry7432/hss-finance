@@ -114,6 +114,39 @@ describe('app router', () => {
     expect(await screen.findByRole('heading', { name: 'Visão geral' })).toBeInTheDocument();
   });
 
+  it('renders the real register form for an unauthenticated visitor', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } }),
+        { headers: { 'Content-Type': 'application/json' }, status: 401 },
+      ),
+    );
+
+    renderProtectedRoute('/register');
+
+    expect(await screen.findByRole('heading', { name: 'Criar conta' })).toBeInTheDocument();
+  });
+
+  it('redirects an authenticated user away from the register route', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            id: '4f8b5484-e733-45f9-9744-a756b1baa1ef',
+            name: 'Harry Sousa',
+            email: 'harry@example.com',
+            createdAt: '2026-09-13T15:00:00.000Z',
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' }, status: 200 },
+      ),
+    );
+
+    renderProtectedRoute('/register');
+
+    expect(await screen.findByRole('heading', { name: 'Visão geral' })).toBeInTheDocument();
+  });
+
   it('leaves a protected route after a successful logout', async () => {
     const user = userEvent.setup();
     fetchMock.mockImplementation((input) => {

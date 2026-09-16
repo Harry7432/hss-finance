@@ -82,6 +82,33 @@ function transactionsResponse(
   });
 }
 
+function createdTransactionResponse(overrides: Record<string, unknown> = {}): Response {
+  return jsonResponse(
+    {
+      data: {
+        id: '55555555-5555-4555-8555-555555555555',
+        type: 'expense',
+        amount: '150.00',
+        transactionDate: '2026-09-13',
+        dueDate: null,
+        categoryId: null,
+        description: null,
+        status: 'pending',
+        paidAt: null,
+        source: 'manual',
+        expenseNature: null,
+        recurringTransactionId: null,
+        recurringPeriod: null,
+        createdBy: '22222222-2222-4222-8222-222222222222',
+        createdAt: '2026-09-13T12:00:00.000Z',
+        updatedAt: '2026-09-13T12:00:00.000Z',
+        ...overrides,
+      },
+    },
+    201,
+  );
+}
+
 type FetchHandler = (url: string) => Response | Promise<Response>;
 
 function mockFetchByUrl(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, handler: FetchHandler) {
@@ -505,6 +532,96 @@ describe('TransactionsPage', () => {
 
       await waitFor(() => expect(latestTransactionsUrl().searchParams.get('page')).toBe('1'));
       expect(latestTransactionsUrl().searchParams.get('type')).toBe('expense');
+    });
+  });
+
+  describe('novo lançamento', () => {
+    function mockFetchForCreateFlow() {
+      let transactionsGetCallCount = 0;
+
+      fetchMock.mockImplementation(async (input, init) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+
+        if (url.endsWith('/households')) return householdsResponse();
+        if (url.includes('/categories')) return categoriesResponse([category()]);
+
+        if (url.includes('/transactions') && method === 'POST') {
+          return createdTransactionResponse();
+        }
+
+        if (url.includes('/transactions')) {
+          transactionsGetCallCount += 1;
+          return transactionsResponse(
+            transactionsGetCallCount === 1
+              ? []
+              : [transactionRecord({ description: 'Novo Mercado' })],
+          );
+        }
+
+        return jsonResponse({ data: [] });
+      });
+    }
+
+    async function fillMinimumValidFields(user: ReturnType<typeof userEvent.setup>) {
+      await user.type(screen.getByLabelText('Valor'), '150');
+      fireEvent.change(screen.getByLabelText('Data do lançamento'), {
+        target: { value: '2026-09-13' },
+      });
+    }
+
+    it('does not show the button when there is no active household', async () => {
+      mockFetchByUrl(fetchMock, () => noHouseholdsResponse());
+
+      renderTransactionsPage();
+
+      await screen.findByText('Você ainda não faz parte de nenhuma família no HSS Finance.');
+      expect(screen.queryByRole('button', { name: 'Novo lançamento' })).not.toBeInTheDocument();
+    });
+
+    it('opens the form when the button is clicked', async () => {
+      const user = userEvent.setup();
+      mockFetchForCreateFlow();
+
+      renderTransactionsPage();
+      await user.click(await screen.findByRole('button', { name: 'Novo lançamento' }));
+
+      expect(screen.getByRole('heading', { name: 'Novo lançamento' })).toBeInTheDocument();
+      expect(screen.getByLabelText('Valor')).toBeInTheDocument();
+    });
+
+    it('closes the form and creates nothing when cancel is clicked', async () => {
+      const user = userEvent.setup();
+      mockFetchForCreateFlow();
+
+      renderTransactionsPage();
+      await user.click(await screen.findByRole('button', { name: 'Novo lançamento' }));
+      await user.click(screen.getByRole('button', { name: 'Cancelar' }));
+
+      expect(screen.queryByLabelText('Valor')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Novo lançamento' })).toBeInTheDocument();
+
+      const postCalls = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
+      expect(postCalls).toHaveLength(0);
+    });
+
+    it('creates a transaction, shows success, closes the form, and refreshes the list', async () => {
+      const user = userEvent.setup();
+      mockFetchForCreateFlow();
+
+      renderTransactionsPage();
+      await screen.findByText('Você ainda não possui lançamentos.');
+
+      await user.click(screen.getByRole('button', { name: 'Novo lançamento' }));
+      await fillMinimumValidFields(user);
+      await user.click(screen.getByRole('button', { name: 'Salvar lançamento' }));
+
+      const successMessage = await screen.findByText('Lançamento criado com sucesso.');
+      expect(successMessage).toHaveAttribute('role', 'status');
+      expect(screen.queryByLabelText('Valor')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Novo lançamento' })).toBeInTheDocument();
+
+      expect((await screen.findAllByText('Novo Mercado')).length).toBeGreaterThan(0);
     });
   });
 });

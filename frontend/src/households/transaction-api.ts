@@ -91,6 +91,61 @@ export async function listTransactions(
   return { transactions: parsedResult.data, meta: result.meta };
 }
 
+export interface CreateTransactionInput {
+  type: 'income' | 'expense';
+  amount: string;
+  transactionDate: string;
+  dueDate?: string | null;
+  categoryId?: string | null;
+  description?: string | null;
+  status?: 'pending' | 'paid';
+  /** Only ever sent for `type: 'expense'` — the backend rejects it for income. */
+  expenseNature?: 'fixed' | 'variable' | null;
+}
+
+export async function createTransaction(
+  householdId: string,
+  input: CreateTransactionInput,
+): Promise<TransactionRecord> {
+  const body: Record<string, unknown> = {
+    type: input.type,
+    amount: input.amount,
+    transactionDate: input.transactionDate,
+  };
+
+  if (input.dueDate !== undefined) {
+    body.dueDate = input.dueDate;
+  }
+
+  if (input.categoryId !== undefined) {
+    body.categoryId = input.categoryId;
+  }
+
+  if (input.description !== undefined) {
+    body.description = input.description;
+  }
+
+  if (input.status !== undefined) {
+    body.status = input.status;
+  }
+
+  if (input.type === 'expense' && input.expenseNature !== undefined) {
+    body.expenseNature = input.expenseNature;
+  }
+
+  const result = await apiRequest<unknown>(`/households/${householdId}/transactions`, {
+    method: 'POST',
+    body,
+  });
+  const parsedResult = transactionRecordSchema.safeParse(result);
+
+  if (!parsedResult.success) {
+    throw new ApiError(201, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return parsedResult.data;
+}
+
 /**
  * The `/households/:householdId/transactions` endpoint accepts `sortBy=dueDate`
  * (optionally `sortOrder=asc|desc`, defaulting to ascending) to order rows by

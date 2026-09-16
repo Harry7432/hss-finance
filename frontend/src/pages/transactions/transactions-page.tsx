@@ -17,6 +17,7 @@ import { ApiError } from '../../lib/api-error';
 import { getTodayInSaoPaulo } from '../../lib/date-only';
 import { ErrorNotice } from '../../components/error-notice';
 import { TransactionFilters } from '../../components/transactions/transaction-filters';
+import { TransactionForm } from '../../components/transactions/transaction-form';
 import { TransactionsList } from '../../components/transactions/transactions-list';
 import { TransactionsPagination } from '../../components/transactions/transactions-pagination';
 
@@ -93,10 +94,54 @@ function TransactionsResults({
   );
 }
 
+function NewTransactionPanel({
+  householdId,
+  categories,
+  isOpen,
+  onOpen,
+  onClose,
+  onCreated,
+}: {
+  householdId: string;
+  categories: Category[];
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  if (!isOpen) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        className="min-h-11 self-start rounded-lg bg-brand px-4 text-sm font-semibold text-on-brand transition-colors hover:bg-brand-strong"
+      >
+        Novo lançamento
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-line/15 bg-surface p-6">
+      <h2 className="text-lg font-semibold text-ink">Novo lançamento</h2>
+      <div className="mt-4">
+        <TransactionForm
+          householdId={householdId}
+          categories={categories}
+          onCancel={onClose}
+          onSuccess={onCreated}
+        />
+      </div>
+    </div>
+  );
+}
+
 function TransactionsSection() {
   const { householdsQuery, activeHousehold } = useActiveHousehold();
   const [filters, setFilters] = useState<TransactionFiltersValue>(DEFAULT_TRANSACTION_FILTERS);
   const [page, setPage] = useState(1);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const categoriesQuery = useHouseholdCategories(activeHousehold?.id);
   const transactionsQuery = useTransactions(activeHousehold?.id, {
     page,
@@ -136,6 +181,30 @@ function TransactionsSection() {
 
   return (
     <div className="flex flex-col gap-6">
+      <NewTransactionPanel
+        householdId={activeHousehold.id}
+        categories={categories}
+        isOpen={isFormOpen}
+        onOpen={() => {
+          setIsFormOpen(true);
+          setSuccessMessage(null);
+        }}
+        onClose={() => setIsFormOpen(false)}
+        onCreated={() => {
+          setIsFormOpen(false);
+          setSuccessMessage('Lançamento criado com sucesso.');
+        }}
+      />
+
+      {successMessage ? (
+        <p
+          role="status"
+          className="rounded-2xl border border-line/15 bg-surface p-4 text-sm font-medium text-income"
+        >
+          {successMessage}
+        </p>
+      ) : null}
+
       <div className="rounded-2xl border border-line/15 bg-surface p-6">
         <TransactionFilters
           value={filters}

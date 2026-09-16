@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { listHouseholdCategories } from './category-api';
+import {
+  createCategory,
+  deleteCategory,
+  listHouseholdCategories,
+  updateCategory,
+} from './category-api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -63,6 +68,150 @@ describe('listHouseholdCategories', () => {
 
     await expect(listHouseholdCategories(HOUSEHOLD_ID)).rejects.toMatchObject({
       code: 'INVALID_RESPONSE',
+    });
+  });
+});
+
+function categoryRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '33333333-3333-4333-8333-333333333333',
+    name: 'Mercado',
+    type: 'expense',
+    color: null,
+    icon: null,
+    isDefault: false,
+    createdAt: '2026-09-01T12:00:00.000Z',
+    updatedAt: '2026-09-01T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('createCategory', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it('posts the name and type to the categories endpoint', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ data: categoryRecord() }, 201));
+
+    await createCategory(HOUSEHOLD_ID, { name: 'Mercado', type: 'expense' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://localhost:3000/api/households/${HOUSEHOLD_ID}/categories`,
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ name: 'Mercado', type: 'expense' }),
+      }),
+    );
+  });
+
+  it('returns the created category', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ data: categoryRecord({ name: 'Lazer' }) }, 201));
+
+    const category = await createCategory(HOUSEHOLD_ID, { name: 'Lazer', type: 'expense' });
+
+    expect(category.name).toBe('Lazer');
+  });
+
+  it('rejects with the backend error code on a 409 duplicate', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: 'CATEGORY_ALREADY_EXISTS', message: 'duplicate' } }, 409),
+    );
+
+    await expect(
+      createCategory(HOUSEHOLD_ID, { name: 'Mercado', type: 'expense' }),
+    ).rejects.toMatchObject({ code: 'CATEGORY_ALREADY_EXISTS', status: 409 });
+  });
+});
+
+describe('updateCategory', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const CATEGORY_ID = '33333333-3333-4333-8333-333333333333';
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it('patches only the name to the category endpoint', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ data: categoryRecord({ name: 'Supermercado' }) }));
+
+    await updateCategory(HOUSEHOLD_ID, CATEGORY_ID, { name: 'Supermercado' });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://localhost:3000/api/households/${HOUSEHOLD_ID}/categories/${CATEGORY_ID}`,
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ name: 'Supermercado' }),
+      }),
+    );
+  });
+
+  it('rejects with the backend error code on a 404', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: 'CATEGORY_NOT_FOUND', message: 'not found' } }, 404),
+    );
+
+    await expect(
+      updateCategory(HOUSEHOLD_ID, CATEGORY_ID, { name: 'Supermercado' }),
+    ).rejects.toMatchObject({ code: 'CATEGORY_NOT_FOUND', status: 404 });
+  });
+});
+
+describe('deleteCategory', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const CATEGORY_ID = '33333333-3333-4333-8333-333333333333';
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it('sends a DELETE request to the category endpoint', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+    await deleteCategory(HOUSEHOLD_ID, CATEGORY_ID);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://localhost:3000/api/households/${HOUSEHOLD_ID}/categories/${CATEGORY_ID}`,
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('rejects with the backend error code when the category is in use', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: 'CATEGORY_IN_USE', message: 'in use' } }, 409),
+    );
+
+    await expect(deleteCategory(HOUSEHOLD_ID, CATEGORY_ID)).rejects.toMatchObject({
+      code: 'CATEGORY_IN_USE',
+      status: 409,
+    });
+  });
+
+  it('rejects with 403 when the requester is not an owner', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ error: { code: 'FORBIDDEN', message: 'Access denied' } }, 403),
+    );
+
+    await expect(deleteCategory(HOUSEHOLD_ID, CATEGORY_ID)).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+      status: 403,
     });
   });
 });

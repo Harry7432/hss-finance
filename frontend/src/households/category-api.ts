@@ -30,3 +30,53 @@ export async function listHouseholdCategories(householdId: string): Promise<Cate
 
   return parsedResult.data;
 }
+
+export interface CreateCategoryInput {
+  name: string;
+  type: 'income' | 'expense';
+}
+
+export async function createCategory(
+  householdId: string,
+  input: CreateCategoryInput,
+): Promise<Category> {
+  const result = await apiRequest<unknown>(`/households/${householdId}/categories`, {
+    method: 'POST',
+    body: { name: input.name, type: input.type },
+  });
+  const parsedResult = categorySchema.safeParse(result);
+
+  if (!parsedResult.success) {
+    throw new ApiError(201, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return parsedResult.data;
+}
+
+export interface UpdateCategoryInput {
+  name: string;
+}
+
+export async function updateCategory(
+  householdId: string,
+  categoryId: string,
+  input: UpdateCategoryInput,
+): Promise<Category> {
+  const result = await apiRequest<unknown>(`/households/${householdId}/categories/${categoryId}`, {
+    method: 'PATCH',
+    body: { name: input.name },
+  });
+  const parsedResult = categorySchema.safeParse(result);
+
+  if (!parsedResult.success) {
+    throw new ApiError(200, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return parsedResult.data;
+}
+
+export async function deleteCategory(householdId: string, categoryId: string): Promise<void> {
+  await apiRequest<void>(`/households/${householdId}/categories/${categoryId}`, {
+    method: 'DELETE',
+  });
+}

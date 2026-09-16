@@ -2,6 +2,7 @@ import { createBrowserRouter, Outlet, type RouteObject } from 'react-router';
 
 import { RequireAuth } from '../auth/require-auth';
 import { AppShell } from '../components/app-shell/app-shell';
+import { CategoriesPage } from '../pages/categories/categories-page';
 import { DashboardPage } from '../pages/dashboard/dashboard-page';
 import { HomePage } from '../pages/home/home-page';
 import { LoginPage } from '../pages/login/login-page';
@@ -41,6 +42,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: 'app/transactions',
                 element: <TransactionsPage />,
+              },
+              {
+                path: 'app/categories',
+                element: <CategoriesPage />,
               },
             ],
           },

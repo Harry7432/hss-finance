@@ -1,6 +1,10 @@
 import { Navigate } from 'react-router';
 
 import { useAuth } from '../../auth/auth-context';
+import { AuthShell } from './auth-shell';
+import { LoginForm } from './login-form';
+
+const SUBTITLE = 'Acesse sua conta para continuar.';
 
 export function LoginPage() {
   const auth = useAuth();
@@ -10,24 +14,35 @@ export function LoginPage() {
   }
 
   if (auth.status === 'loading') {
-    return <p role="status">Verificando sessão...</p>;
+    return (
+      <AuthShell subtitle={SUBTITLE}>
+        <p role="status" className="text-ink-muted">
+          Verificando sessão...
+        </p>
+      </AuthShell>
+    );
   }
 
   if (auth.status === 'error') {
     return (
-      <div role="alert">
-        <p>Não foi possível verificar sua sessão.</p>
-        <button type="button" onClick={() => auth.retry()}>
-          Tentar novamente
-        </button>
-      </div>
+      <AuthShell subtitle={SUBTITLE}>
+        <div role="alert" className="flex flex-col items-start gap-3">
+          <p className="text-ink">Não foi possível verificar sua sessão.</p>
+          <button
+            type="button"
+            onClick={() => auth.retry()}
+            className="min-h-11 rounded-lg border border-line/45 px-4 font-medium text-ink transition-colors hover:bg-surface-alt"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      </AuthShell>
     );
   }
 
   return (
-    <main>
-      <h1>Entrar</h1>
-      <p>A interface de autenticação será implementada em um próximo slice.</p>
-    </main>
+    <AuthShell subtitle={SUBTITLE}>
+      <LoginForm />
+    </AuthShell>
   );
 }

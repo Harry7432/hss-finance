@@ -56,40 +56,67 @@ describe('DashboardPage', () => {
 
     renderDashboard();
 
-    expect(screen.getByRole('status')).toHaveTextContent('Carregando resumo financeiro');
+    const statuses = screen.getAllByRole('status');
+    expect(statuses.map((status) => status.textContent)).toEqual([
+      expect.stringContaining('Carregando resumo financeiro'),
+      expect.stringContaining('Carregando próximos vencimentos'),
+    ]);
     expect(screen.queryByText(/R\$/)).not.toBeInTheDocument();
   });
 
   it('renders the real financial summary once households and totals resolve', async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data: [
-              {
-                id: '9c6a6e2e-df3a-4a4c-9d8c-3a2a4a2e0e10',
-                name: 'Casa Sousa',
-                currencyCode: 'BRL',
-                role: 'owner',
-                createdAt: '2026-09-01T12:00:00.000Z',
-              },
-            ],
+    fetchMock.mockImplementation((input) => {
+      const url = String(input);
+
+      if (url.endsWith('/households')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: '9c6a6e2e-df3a-4a4c-9d8c-3a2a4a2e0e10',
+                  name: 'Casa Sousa',
+                  currencyCode: 'BRL',
+                  role: 'owner',
+                  createdAt: '2026-09-01T12:00:00.000Z',
+                },
+              ],
+            }),
+            { headers: { 'Content-Type': 'application/json' }, status: 200 },
+          ),
+        );
+      }
+
+      if (url.includes('/summary')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              data: { totalIncome: '1000.00', totalExpense: '400.00', balance: '600.00' },
+            }),
+            { headers: { 'Content-Type': 'application/json' }, status: 200 },
+          ),
+        );
+      }
+
+      if (url.includes('/transactions')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ data: [] }), {
+            headers: { 'Content-Type': 'application/json' },
+            status: 200,
           }),
-          { headers: { 'Content-Type': 'application/json' }, status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            data: { totalIncome: '1000.00', totalExpense: '400.00', balance: '600.00' },
-          }),
-          { headers: { 'Content-Type': 'application/json' }, status: 200 },
-        ),
-      );
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected fetch to ${url}`));
+    });
 
     renderDashboard();
 
     expect(await screen.findByRole('heading', { level: 2, name: 'Saldo' })).toBeInTheDocument();
     expect(screen.getByText(/R\$\s600,00/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Próximos vencimentos' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Nenhuma conta próxima do vencimento.')).toBeInTheDocument();
   });
 });

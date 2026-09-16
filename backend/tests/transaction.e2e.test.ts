@@ -322,12 +322,37 @@ class InMemoryTransactionRepository implements TransactionRepository {
       )
       .filter((record) => data.startDate === undefined || record.transactionDate >= data.startDate)
       .filter((record) => data.endDate === undefined || record.transactionDate <= data.endDate)
-      .sort(
-        (left, right) =>
+      .sort((left, right) => {
+        if (data.sortBy === 'dueDate') {
+          // Mirrors TypeOrmTransactionRepository: dueDate NULLS LAST regardless of direction,
+          // with createdAt/id tie-breaks in the same direction as the primary sort.
+          if (left.dueDate === null && right.dueDate === null) {
+            return 0;
+          }
+
+          if (left.dueDate === null) {
+            return 1;
+          }
+
+          if (right.dueDate === null) {
+            return -1;
+          }
+
+          const direction = data.sortOrder === 'desc' ? -1 : 1;
+
+          return (
+            direction * left.dueDate.localeCompare(right.dueDate) ||
+            direction * (left.createdAt.getTime() - right.createdAt.getTime()) ||
+            direction * left.id.localeCompare(right.id)
+          );
+        }
+
+        return (
           right.transactionDate.localeCompare(left.transactionDate) ||
           right.createdAt.getTime() - left.createdAt.getTime() ||
-          right.id.localeCompare(left.id),
-      );
+          right.id.localeCompare(left.id)
+        );
+      });
     const offset = (data.page - 1) * data.limit;
 
     return {
@@ -1335,6 +1360,169 @@ describe('GET /api/households/:householdId/transactions', () => {
     expect(response.body.meta).toEqual({ page: 2, limit: 1, total: 3, totalPages: 3 });
   });
 
+  it('keeps the default order (transactionDate DESC, createdAt DESC, id DESC) when sortBy is absent', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const older = storedTransaction({ transactionDate: '2026-09-01', dueDate: '2026-09-30' });
+    const newer = storedTransaction({ transactionDate: '2026-09-15', dueDate: '2026-09-05' });
+    transactions.records.push(older, newer);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      newer.id,
+      older.id,
+    ]);
+    expect(transactions.listCalls[0]).not.toHaveProperty('sortBy');
+  });
+
+  it('orders by dueDate ascending when sortBy=dueDate, with NULL dueDate last', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const soonest = storedTransaction({ dueDate: '2026-09-10' });
+    const middle = storedTransaction({ dueDate: '2026-09-20' });
+    const latest = storedTransaction({ dueDate: '2026-09-30' });
+    const withoutDueDate = storedTransaction({ dueDate: null });
+    transactions.records.push(latest, withoutDueDate, soonest, middle);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ sortBy: 'dueDate' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      soonest.id,
+      middle.id,
+      latest.id,
+      withoutDueDate.id,
+    ]);
+    expect(transactions.listCalls[0]).toMatchObject({ sortBy: 'dueDate' });
+  });
+
+  it('orders by dueDate descending when sortBy=dueDate&sortOrder=desc, with NULL dueDate still last', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const soonest = storedTransaction({ dueDate: '2026-09-10' });
+    const latest = storedTransaction({ dueDate: '2026-09-30' });
+    const withoutDueDate = storedTransaction({ dueDate: null });
+    transactions.records.push(soonest, withoutDueDate, latest);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ sortBy: 'dueDate', sortOrder: 'desc' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      latest.id,
+      soonest.id,
+      withoutDueDate.id,
+    ]);
+    expect(transactions.listCalls[0]).toMatchObject({ sortBy: 'dueDate', sortOrder: 'desc' });
+  });
+
+  it('breaks a dueDate tie deterministically by id, in the same direction as the primary sort', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const first = storedTransaction({
+      id: '00000000-0000-4000-8000-000000000001',
+      dueDate: '2026-09-15',
+    });
+    const second = storedTransaction({
+      id: '00000000-0000-4000-8000-000000000002',
+      dueDate: '2026-09-15',
+    });
+    transactions.records.push(second, first);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ sortBy: 'dueDate' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      first.id,
+      second.id,
+    ]);
+  });
+
+  it('combines state=overdue with sortBy=dueDate, ordering the most overdue account first', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const mostOverdue = storedTransaction({ dueDate: '2026-08-01' });
+    const leastOverdue = storedTransaction({ dueDate: '2026-09-12' });
+    const notOverdue = storedTransaction({ dueDate: '2026-09-20' });
+    transactions.records.push(notOverdue, leastOverdue, mostOverdue);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ state: 'overdue', sortBy: 'dueDate' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      mostOverdue.id,
+      leastOverdue.id,
+    ]);
+    expect(transactions.listCalls[0]).toMatchObject({ state: 'overdue', sortBy: 'dueDate' });
+  });
+
+  it('combines state=pending with sortBy=dueDate, ordering the soonest due account first', async () => {
+    const { app, transactions } = createTestContext();
+    grantMembership(transactions, 'member');
+    const dueToday = storedTransaction({ dueDate: TODAY });
+    const dueSoon = storedTransaction({ dueDate: '2026-09-16' });
+    const dueLater = storedTransaction({ dueDate: '2026-09-30' });
+    const withoutDueDate = storedTransaction({ dueDate: null });
+    transactions.records.push(dueLater, withoutDueDate, dueToday, dueSoon);
+    const token = await createToken(USER_ID);
+
+    const response = await request(app)
+      .get(`/api/households/${HOUSEHOLD_ID}/transactions`)
+      .query({ state: 'pending', sortBy: 'dueDate' })
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.map((record: { id: string }) => record.id)).toEqual([
+      dueToday.id,
+      dueSoon.id,
+      dueLater.id,
+      withoutDueDate.id,
+    ]);
+    expect(transactions.listCalls[0]).toMatchObject({ state: 'pending', sortBy: 'dueDate' });
+  });
+
+  it.each([
+    ['a nonexistent household', randomUUID(), USER_ID],
+    ['a user without membership', HOUSEHOLD_ID, OTHER_USER_ID],
+  ] as const)(
+    'returns the same 403 for %s even when sortBy=dueDate is requested, without leaking household state',
+    async (_caseName, householdId, userId) => {
+      const { app, transactions } = createTestContext();
+      transactions.records.push(storedTransaction());
+      const token = await createToken(userId);
+
+      const response = await request(app)
+        .get(`/api/households/${householdId}/transactions`)
+        .query({ sortBy: 'dueDate' })
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: { code: 'FORBIDDEN', message: 'Access denied' },
+      });
+    },
+  );
+
   it('filters by categoryId', async () => {
     const { app, transactions } = createTestContext();
     grantMembership(transactions, 'member');
@@ -1624,6 +1812,10 @@ describe('GET /api/households/:householdId/transactions', () => {
     ['impossible endDate', { endDate: '2026-04-31' }],
     ['year 0000 endDate', { endDate: '0000-12-31' }],
     ['inverted date range', { startDate: '2026-10-01', endDate: '2026-09-30' }],
+    ['invalid sortBy column', { sortBy: 'transactionDate' }],
+    ['invalid sortBy value', { sortBy: 'amount' }],
+    ['invalid sortOrder value', { sortBy: 'dueDate', sortOrder: 'ascending' }],
+    ['sortOrder without sortBy', { sortOrder: 'asc' }],
   ])('returns 400 and does not list for %s', async (_caseName, query) => {
     const { app, transactions } = createTestContext();
     grantMembership(transactions, 'member');
@@ -3784,6 +3976,53 @@ describe('TypeOrmTransactionRepository', () => {
       total: 7,
     });
   });
+
+  it.each([
+    [undefined, 'ASC'],
+    ['asc', 'ASC'],
+    ['desc', 'DESC'],
+  ] as const)(
+    'orders by due_date NULLS LAST (with sortOrder=%s) when sortBy is dueDate',
+    async (sortOrder, direction) => {
+      const query = {
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
+        offset: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getCount: jest.fn(async () => 0),
+        getRawMany: jest.fn(async () => []),
+      };
+      const membershipFindOne = jest.fn(async () =>
+        Object.assign(new HouseholdMemberEntity(), { id: randomUUID() }),
+      );
+      const createQueryBuilder = jest.fn(() => query);
+      const getRepository = jest.fn((entity: unknown) =>
+        entity === HouseholdMemberEntity ? { findOne: membershipFindOne } : { createQueryBuilder },
+      );
+      const dataSource = { getRepository, transaction: jest.fn() } as unknown as DataSource;
+      const repository = new TypeOrmTransactionRepository(dataSource);
+
+      await repository.listAsMember({
+        householdId: HOUSEHOLD_ID,
+        requesterId: USER_ID,
+        page: 1,
+        limit: 20,
+        today: TODAY,
+        sortBy: 'dueDate',
+        ...(sortOrder === undefined ? {} : { sortOrder }),
+      });
+
+      expect(query.orderBy).toHaveBeenCalledWith('transaction.due_date', direction, 'NULLS LAST');
+      expect(query.addOrderBy.mock.calls).toEqual([
+        ['transaction.created_at', direction],
+        ['transaction.id', direction],
+      ]);
+    },
+  );
 
   it.each(['pending', 'overdue'] as const)(
     'applies the derived %s state to count and rows without a transaction or lock',

@@ -19,7 +19,7 @@ const householdSchema = z.object({
 
 export type Household = z.infer<typeof householdSchema>;
 
-const monetaryAmountSchema = z.string().regex(/^-?\d+\.\d{2}$/);
+export const monetaryAmountSchema = z.string().regex(/^-?\d+\.\d{2}$/);
 
 const householdSummarySchema = z.object({
   totalIncome: monetaryAmountSchema,

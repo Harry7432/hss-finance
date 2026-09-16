@@ -13,6 +13,8 @@ export type TransactionStatus = 'pending' | 'paid';
 export type TransactionState = 'pending' | 'overdue';
 export type TransactionSource = 'manual' | 'bank_import' | 'recurring';
 export type TransactionExpenseNature = 'fixed' | 'variable';
+export type TransactionSortBy = 'dueDate';
+export type TransactionSortOrder = 'asc' | 'desc';
 
 export interface TransactionRecord {
   id: string;
@@ -62,6 +64,8 @@ export interface ListTransactionsData {
   page: number;
   limit: number;
   today: string;
+  sortBy?: TransactionSortBy;
+  sortOrder?: TransactionSortOrder;
 }
 
 export interface ListTransactionsResult {
@@ -743,7 +747,8 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
     }
 
     const total = await query.getCount();
-    const transactions = await query
+
+    query
       .select('transaction.id', 'id')
       .addSelect('transaction.type', 'type')
       .addSelect('transaction.amount', 'amount')
@@ -759,10 +764,25 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       .addSelect('transaction.recurring_period', 'recurringPeriod')
       .addSelect('transaction.created_by', 'createdBy')
       .addSelect('transaction.created_at', 'createdAt')
-      .addSelect('transaction.updated_at', 'updatedAt')
-      .orderBy('transaction.transaction_date', 'DESC')
-      .addOrderBy('transaction.created_at', 'DESC')
-      .addOrderBy('transaction.id', 'DESC')
+      .addSelect('transaction.updated_at', 'updatedAt');
+
+    if (data.sortBy === 'dueDate') {
+      // Whitelisted sort: the controller only ever passes 'dueDate' (asc/desc) here, so this
+      // never interpolates a user-provided column or direction into SQL.
+      const direction = data.sortOrder === 'desc' ? 'DESC' : 'ASC';
+
+      query
+        .orderBy('transaction.due_date', direction, 'NULLS LAST')
+        .addOrderBy('transaction.created_at', direction)
+        .addOrderBy('transaction.id', direction);
+    } else {
+      query
+        .orderBy('transaction.transaction_date', 'DESC')
+        .addOrderBy('transaction.created_at', 'DESC')
+        .addOrderBy('transaction.id', 'DESC');
+    }
+
+    const transactions = await query
       .offset((data.page - 1) * data.limit)
       .limit(data.limit)
       .getRawMany<TransactionRow>();

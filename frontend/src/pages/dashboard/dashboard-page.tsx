@@ -1,5 +1,6 @@
 import { useAuth } from '../../auth/auth-context';
 import { FinancialSummary } from '../../components/financial-summary/financial-summary';
+import { UpcomingPayments } from '../../components/upcoming-payments/upcoming-payments';
 
 export function DashboardPage() {
   const auth = useAuth();
@@ -16,6 +17,8 @@ export function DashboardPage() {
       </div>
 
       <FinancialSummary />
+
+      <UpcomingPayments />
     </div>
   );
 }

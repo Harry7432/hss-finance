@@ -17,6 +17,8 @@ const pageSchema = z
   .transform(Number)
   .refine(Number.isSafeInteger);
 const limitSchema = pageSchema.refine((limit) => limit <= 100);
+const sortBySchema = z.enum(['dueDate']);
+const sortOrderSchema = z.enum(['asc', 'desc']);
 const listTransactionsQuerySchema = z.strictObject({
   type: z.enum(['income', 'expense']).optional(),
   status: z.enum(['pending', 'paid']).optional(),
@@ -29,6 +31,8 @@ const listTransactionsQuerySchema = z.strictObject({
   endDate: transactionDateSchema.optional(),
   page: pageSchema.optional(),
   limit: limitSchema.optional(),
+  sortBy: sortBySchema.optional(),
+  sortOrder: sortOrderSchema.optional(),
 });
 
 export function listTransactionsController(service: ListTransactionsService): RequestHandler {
@@ -63,6 +67,7 @@ export function listTransactionsController(service: ListTransactionsService): Re
       (parsedQuery.data.startDate !== undefined &&
         parsedQuery.data.endDate !== undefined &&
         parsedQuery.data.startDate > parsedQuery.data.endDate) ||
+      (parsedQuery.data.sortOrder !== undefined && parsedQuery.data.sortBy === undefined) ||
       (page - 1) * limit > Number.MAX_SAFE_INTEGER
     ) {
       response.status(400).json({
@@ -94,6 +99,10 @@ export function listTransactionsController(service: ListTransactionsService): Re
           ? {}
           : { startDate: parsedQuery.data.startDate }),
         ...(parsedQuery.data.endDate === undefined ? {} : { endDate: parsedQuery.data.endDate }),
+        ...(parsedQuery.data.sortBy === undefined ? {} : { sortBy: parsedQuery.data.sortBy }),
+        ...(parsedQuery.data.sortOrder === undefined
+          ? {}
+          : { sortOrder: parsedQuery.data.sortOrder }),
       });
 
       response.status(200).json({

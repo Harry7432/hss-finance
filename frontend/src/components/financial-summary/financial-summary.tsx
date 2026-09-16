@@ -1,7 +1,8 @@
+import { useActiveHousehold } from '../../households/use-active-household';
+import { useHouseholdSummary } from '../../households/use-household-summary';
 import { ApiError } from '../../lib/api-error';
 import { formatCurrencyBRL } from '../../lib/currency';
-import { useHouseholdSummary } from '../../households/use-household-summary';
-import { useHouseholds } from '../../households/use-households';
+import { ErrorNotice } from '../error-notice';
 import { SummaryCard } from './summary-card';
 
 function SummarySkeleton() {
@@ -26,30 +27,6 @@ function SummarySkeleton() {
   );
 }
 
-function ErrorNotice({
-  title,
-  description,
-  onRetry,
-}: {
-  title: string;
-  description: string;
-  onRetry: () => void;
-}) {
-  return (
-    <div role="alert" className="rounded-2xl border border-line/15 bg-surface p-6">
-      <p className="font-medium text-ink">{title}</p>
-      <p className="mt-1 text-sm text-ink-muted">{description}</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="mt-4 min-h-11 rounded-lg border border-line/25 px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-alt"
-      >
-        Tentar novamente
-      </button>
-    </div>
-  );
-}
-
 function resolveSummaryErrorMessage(error: unknown): { title: string; description: string } {
   if (error instanceof ApiError && error.status === 403) {
     return {
@@ -65,8 +42,7 @@ function resolveSummaryErrorMessage(error: unknown): { title: string; descriptio
 }
 
 export function FinancialSummary() {
-  const householdsQuery = useHouseholds();
-  const activeHousehold = householdsQuery.data?.[0];
+  const { householdsQuery, activeHousehold } = useActiveHousehold();
   const summaryQuery = useHouseholdSummary(activeHousehold?.id);
 
   if (householdsQuery.isPending || (activeHousehold !== undefined && summaryQuery.isPending)) {

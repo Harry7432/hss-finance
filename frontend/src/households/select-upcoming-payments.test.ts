@@ -12,6 +12,7 @@ function transaction(overrides: Partial<TransactionRecord> & { id: string }): Tr
   return {
     type: 'expense',
     amount: '100.00',
+    transactionDate: '2026-09-01',
     dueDate: null,
     categoryId: null,
     description: 'Conta de luz',

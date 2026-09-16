@@ -8,6 +8,7 @@ import { LoginPage } from '../pages/login/login-page';
 import { NotFoundPage } from '../pages/not-found/not-found-page';
 import { RegisterPage } from '../pages/register/register-page';
 import { RouteErrorPage } from '../pages/route-error/route-error-page';
+import { TransactionsPage } from '../pages/transactions/transactions-page';
 
 export const appRoutes: RouteObject[] = [
   {
@@ -36,6 +37,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: 'app',
                 element: <DashboardPage />,
+              },
+              {
+                path: 'app/transactions',
+                element: <TransactionsPage />,
               },
             ],
           },

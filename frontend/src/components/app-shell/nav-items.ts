@@ -5,7 +5,7 @@ export interface NavItem {
 
 export const navItems: NavItem[] = [
   { label: 'Dashboard', to: '/app' },
-  { label: 'Lançamentos' },
+  { label: 'Lançamentos', to: '/app/transactions' },
   { label: 'Categorias' },
   { label: 'Família' },
 ];

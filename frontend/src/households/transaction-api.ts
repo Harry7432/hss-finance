@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { ApiError } from '../lib/api-error';
-import { apiRequest } from '../lib/http';
+import { apiRequest, apiRequestPaginated, type PaginationMeta } from '../lib/http';
 import { monetaryAmountSchema } from './household-api';
 
 const dateOnlySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -10,6 +10,7 @@ const transactionRecordSchema = z.object({
   id: z.uuid(),
   type: z.enum(['income', 'expense']),
   amount: monetaryAmountSchema,
+  transactionDate: dateOnlySchema,
   dueDate: dateOnlySchema.nullable(),
   categoryId: z.uuid().nullable(),
   description: z.string().nullable(),
@@ -17,6 +18,78 @@ const transactionRecordSchema = z.object({
 });
 
 export type TransactionRecord = z.infer<typeof transactionRecordSchema>;
+
+export const TRANSACTIONS_PAGE_SIZE = 20;
+
+export interface TransactionListFilters {
+  type?: 'income' | 'expense';
+  status?: 'pending' | 'paid';
+  categoryId?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface TransactionListParams extends TransactionListFilters {
+  page: number;
+}
+
+export interface TransactionListResult {
+  transactions: TransactionRecord[];
+  meta: PaginationMeta;
+}
+
+export function transactionsQueryKey(
+  householdId: string | undefined,
+  params: TransactionListParams,
+) {
+  return ['transactions', householdId, 'list', params] as const;
+}
+
+function buildTransactionListQuery(params: TransactionListParams): URLSearchParams {
+  const query = new URLSearchParams({
+    page: String(params.page),
+    limit: String(TRANSACTIONS_PAGE_SIZE),
+  });
+
+  if (params.type !== undefined) {
+    query.set('type', params.type);
+  }
+
+  if (params.status !== undefined) {
+    query.set('status', params.status);
+  }
+
+  if (params.categoryId !== undefined) {
+    query.set('categoryId', params.categoryId);
+  }
+
+  if (params.startDate !== undefined) {
+    query.set('startDate', params.startDate);
+  }
+
+  if (params.endDate !== undefined) {
+    query.set('endDate', params.endDate);
+  }
+
+  return query;
+}
+
+export async function listTransactions(
+  householdId: string,
+  params: TransactionListParams,
+): Promise<TransactionListResult> {
+  const query = buildTransactionListQuery(params);
+  const result = await apiRequestPaginated<unknown>(
+    `/households/${householdId}/transactions?${query.toString()}`,
+  );
+  const parsedResult = z.array(transactionRecordSchema).safeParse(result.data);
+
+  if (!parsedResult.success) {
+    throw new ApiError(200, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return { transactions: parsedResult.data, meta: result.meta };
+}
 
 /**
  * The `/households/:householdId/transactions` endpoint accepts `sortBy=dueDate`

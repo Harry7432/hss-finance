@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiError } from './api-error';
-import { apiRequest, clearAccessTokenProvider, setAccessTokenProvider } from './http';
+import {
+  apiRequest,
+  apiRequestPaginated,
+  clearAccessTokenProvider,
+  setAccessTokenProvider,
+} from './http';
 
 describe('apiRequest', () => {
   const fetchMock = vi.fn<typeof fetch>();
@@ -115,5 +120,61 @@ describe('apiRequest', () => {
     fetchMock.mockRejectedValue(abortError);
 
     await expect(apiRequest('/resource', { signal: controller.signal })).rejects.toBe(abortError);
+  });
+});
+
+describe('apiRequestPaginated', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it('returns data and pagination meta from a successful response', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ id: '1' }],
+          meta: { page: 1, limit: 20, total: 1, totalPages: 1 },
+        }),
+        { headers: { 'Content-Type': 'application/json' }, status: 200 },
+      ),
+    );
+
+    await expect(apiRequestPaginated<{ id: string }[]>('/resource')).resolves.toEqual({
+      data: [{ id: '1' }],
+      meta: { page: 1, limit: 20, total: 1, totalPages: 1 },
+    });
+  });
+
+  it('rejects a response missing the pagination meta block', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ data: [] }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      }),
+    );
+
+    await expect(apiRequestPaginated('/resource')).rejects.toEqual(
+      new ApiError(200, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.'),
+    );
+  });
+
+  it('throws the error returned by the API', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 'FORBIDDEN', message: 'Access denied' } }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 403,
+      }),
+    );
+
+    await expect(apiRequestPaginated('/resource')).rejects.toEqual(
+      new ApiError(403, 'FORBIDDEN', 'Access denied'),
+    );
   });
 });

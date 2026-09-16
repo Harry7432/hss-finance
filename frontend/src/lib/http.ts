@@ -10,6 +10,20 @@ const errorEnvelopeSchema = z.object({
     message: z.string(),
   }),
 });
+const paginationMetaSchema = z.object({
+  page: z.number(),
+  limit: z.number(),
+  total: z.number(),
+  totalPages: z.number(),
+});
+const paginatedEnvelopeSchema = z.object({ data: z.unknown(), meta: paginationMetaSchema });
+
+export type PaginationMeta = z.infer<typeof paginationMetaSchema>;
+
+export interface PaginatedResult<T> {
+  data: T;
+  meta: PaginationMeta;
+}
 
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type AccessTokenProvider = () => string | null;
@@ -50,7 +64,7 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-export async function apiRequest<T>(
+async function sendRequest(
   path: string,
   {
     method = 'GET',
@@ -59,7 +73,7 @@ export async function apiRequest<T>(
     headers: initialHeaders,
     signal,
   }: ApiRequestOptions = {},
-): Promise<T> {
+): Promise<{ status: number; payload: unknown }> {
   const headers = new Headers(initialHeaders);
   const accessToken = accessTokenProvider?.();
 
@@ -105,19 +119,41 @@ export async function apiRequest<T>(
     throw new ApiError(response.status, 'REQUEST_FAILED', 'A requisição não pôde ser concluída.');
   }
 
-  if (response.status === 204) {
+  return { status: response.status, payload };
+}
+
+export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const { status, payload } = await sendRequest(path, options);
+
+  if (status === 204) {
     return undefined as T;
   }
 
   const parsedSuccess = successEnvelopeSchema.safeParse(payload);
 
   if (!parsedSuccess.success) {
-    throw new ApiError(
-      response.status,
-      'INVALID_RESPONSE',
-      'O servidor retornou uma resposta inválida.',
-    );
+    throw new ApiError(status, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
   }
 
   return parsedSuccess.data.data as T;
+}
+
+/**
+ * Like `apiRequest`, but for list endpoints that return a `meta` pagination
+ * block alongside `data` (page/limit/total/totalPages). Kept separate from
+ * `apiRequest` because most endpoints only ever need `data` and discarding
+ * `meta` there keeps their call sites simple.
+ */
+export async function apiRequestPaginated<T>(
+  path: string,
+  options: ApiRequestOptions = {},
+): Promise<PaginatedResult<T>> {
+  const { status, payload } = await sendRequest(path, options);
+  const parsedSuccess = paginatedEnvelopeSchema.safeParse(payload);
+
+  if (!parsedSuccess.success) {
+    throw new ApiError(status, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return { data: parsedSuccess.data.data as T, meta: parsedSuccess.data.meta };
 }

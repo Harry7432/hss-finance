@@ -62,10 +62,19 @@ describe('AppShell', () => {
   it('does not render broken navigation for routes that do not exist yet', () => {
     renderAppShell();
 
-    expect(screen.queryByRole('link', { name: 'Lançamentos' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Categorias' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Família' })).not.toBeInTheDocument();
-    expect(screen.getByText('Lançamentos')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText('Categorias')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByText('Família')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('renders a working link to the transactions route', () => {
+    renderAppShell();
+
+    expect(screen.getByRole('link', { name: 'Lançamentos' })).toHaveAttribute(
+      'href',
+      '/app/transactions',
+    );
   });
 
   it('logs out from the sidebar, shows loading feedback, and blocks a second click', async () => {

@@ -59,11 +59,10 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
   });
 
-  it('does not render broken navigation for routes that do not exist yet', () => {
+  it('renders a working link to the family route', () => {
     renderAppShell();
 
-    expect(screen.queryByRole('link', { name: 'Família' })).not.toBeInTheDocument();
-    expect(screen.getByText('Família')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('link', { name: 'Família' })).toHaveAttribute('href', '/app/family');
   });
 
   it('renders a working link to the transactions route', () => {

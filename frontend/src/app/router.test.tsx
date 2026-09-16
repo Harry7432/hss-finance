@@ -160,6 +160,39 @@ describe('app router', () => {
     expect(await screen.findByRole('heading', { name: 'Categorias' })).toBeInTheDocument();
   });
 
+  it('redirects an unauthenticated user from the family route to login', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Authentication required' } }),
+        { headers: { 'Content-Type': 'application/json' }, status: 401 },
+      ),
+    );
+
+    renderProtectedRoute('/app/family');
+
+    expect(await screen.findByRole('heading', { name: 'Entrar' })).toBeInTheDocument();
+  });
+
+  it('renders the family route for an authenticated user', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            id: '4f8b5484-e733-45f9-9744-a756b1baa1ef',
+            name: 'Harry Sousa',
+            email: 'harry@example.com',
+            createdAt: '2026-09-13T15:00:00.000Z',
+          },
+        }),
+        { headers: { 'Content-Type': 'application/json' }, status: 200 },
+      ),
+    );
+
+    renderProtectedRoute('/app/family');
+
+    expect(await screen.findByRole('heading', { name: 'Família' })).toBeInTheDocument();
+  });
+
   it('redirects an authenticated user away from the login route', async () => {
     fetchMock.mockResolvedValue(
       new Response(

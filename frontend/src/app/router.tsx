@@ -4,6 +4,7 @@ import { RequireAuth } from '../auth/require-auth';
 import { AppShell } from '../components/app-shell/app-shell';
 import { CategoriesPage } from '../pages/categories/categories-page';
 import { DashboardPage } from '../pages/dashboard/dashboard-page';
+import { FamilyPage } from '../pages/family/family-page';
 import { HomePage } from '../pages/home/home-page';
 import { LoginPage } from '../pages/login/login-page';
 import { NotFoundPage } from '../pages/not-found/not-found-page';
@@ -46,6 +47,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: 'app/categories',
                 element: <CategoriesPage />,
+              },
+              {
+                path: 'app/family',
+                element: <FamilyPage />,
               },
             ],
           },

@@ -7,5 +7,5 @@ export const navItems: NavItem[] = [
   { label: 'Dashboard', to: '/app' },
   { label: 'Lançamentos', to: '/app/transactions' },
   { label: 'Categorias', to: '/app/categories' },
-  { label: 'Família' },
+  { label: 'Família', to: '/app/family' },
 ];

@@ -3,6 +3,7 @@ import 'dotenv/config';
 const DEFAULT_PORT = 3000;
 const DEFAULT_FRONTEND_ORIGIN = 'http://localhost:5173';
 const DEFAULT_DATABASE_URL = 'postgresql://hss_finance:hss_finance_dev@localhost:5433/hss_finance';
+const DEFAULT_PLUGGY_BASE_URL = 'https://api.pluggy.ai';
 const NODE_ENVIRONMENTS = ['development', 'test', 'production'] as const;
 
 type NodeEnvironment = (typeof NODE_ENVIRONMENTS)[number];
@@ -79,6 +80,34 @@ function parseDatabaseUrl(value: string | undefined): string {
   return databaseUrl;
 }
 
+export function parsePluggyBaseUrl(value: string | undefined): string {
+  const baseUrl = value ?? DEFAULT_PLUGGY_BASE_URL;
+
+  try {
+    const url = new URL(baseUrl);
+
+    if (
+      url.protocol !== 'https:' ||
+      url.origin !== baseUrl ||
+      url.username.length > 0 ||
+      url.password.length > 0 ||
+      url.pathname !== '/' ||
+      url.search.length > 0 ||
+      url.hash.length > 0
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new Error('PLUGGY_BASE_URL must be a valid HTTPS origin without a path.');
+  }
+
+  return baseUrl;
+}
+
+function parseOptionalSecret(value: string | undefined): string | undefined {
+  return value && value.length > 0 ? value : undefined;
+}
+
 function parseBoolean(name: string, value: string | undefined, defaultValue: boolean): boolean {
   if (value === undefined) {
     return defaultValue;
@@ -105,4 +134,8 @@ export const env = Object.freeze({
   databaseUrl: parseDatabaseUrl(process.env.DATABASE_URL),
   databaseLogging: parseBoolean('DATABASE_LOGGING', process.env.DATABASE_LOGGING, false),
   secureCookies: nodeEnvironment === 'production',
+  // Not yet consumed by the app; the Pluggy provider isn't wired in (see Slice 6.4).
+  pluggyClientId: parseOptionalSecret(process.env.PLUGGY_CLIENT_ID),
+  pluggyClientSecret: parseOptionalSecret(process.env.PLUGGY_CLIENT_SECRET),
+  pluggyBaseUrl: parsePluggyBaseUrl(process.env.PLUGGY_BASE_URL),
 });

@@ -1,5 +1,9 @@
 import { parseJwtSecret } from '../src/config/jwt.js';
-import { parseFrontendOrigin, parseNodeEnvironment } from '../src/config/env.js';
+import {
+  parseFrontendOrigin,
+  parseNodeEnvironment,
+  parsePluggyBaseUrl,
+} from '../src/config/env.js';
 import { createSessionCookieOptions } from '../src/config/session.js';
 
 describe('JWT_SECRET configuration', () => {
@@ -59,6 +63,29 @@ describe('NODE_ENV configuration', () => {
   it.each([undefined, 'staging', 'prod'])('rejects an unsupported value: %s', (environment) => {
     expect(() => parseNodeEnvironment(environment)).toThrow(
       'NODE_ENV must be development, test, or production.',
+    );
+  });
+});
+
+describe('Pluggy base URL configuration', () => {
+  it('defaults to the Pluggy production API when unset', () => {
+    expect(parsePluggyBaseUrl(undefined)).toBe('https://api.pluggy.ai');
+  });
+
+  it('accepts a canonical HTTPS origin', () => {
+    expect(parsePluggyBaseUrl('https://api.pluggy.test')).toBe('https://api.pluggy.test');
+  });
+
+  it.each([
+    'http://api.pluggy.ai',
+    'https://user:password@api.pluggy.ai',
+    'https://api.pluggy.ai/',
+    'https://api.pluggy.ai/path',
+    'https://api.pluggy.ai?query=true',
+    'not-a-url',
+  ])('rejects a non-canonical or insecure base URL: %s', (baseUrl) => {
+    expect(() => parsePluggyBaseUrl(baseUrl)).toThrow(
+      'PLUGGY_BASE_URL must be a valid HTTPS origin without a path.',
     );
   });
 });

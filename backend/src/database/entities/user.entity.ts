@@ -7,6 +7,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+import { BankConnectionEntity } from './bank-connection.entity.js';
 import { HouseholdEntity } from './household.entity.js';
 import { HouseholdMemberEntity } from './household-member.entity.js';
 import { TransactionEntity } from './transaction.entity.js';
@@ -39,4 +40,7 @@ export class UserEntity {
 
   @OneToMany(() => TransactionEntity, (transaction) => transaction.createdBy)
   createdTransactions!: TransactionEntity[];
+
+  @OneToMany(() => BankConnectionEntity, (connection) => connection.createdBy)
+  createdBankConnections!: BankConnectionEntity[];
 }

@@ -9,6 +9,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
+import { BankAccountEntity } from './bank-account.entity.js';
 import { CategoryEntity } from './category.entity.js';
 import { HouseholdEntity } from './household.entity.js';
 import { RecurringTransactionEntity } from './recurring-transaction.entity.js';
@@ -26,6 +27,8 @@ import { UserEntity } from './user.entity.js';
 )
 @Check('("recurring_transaction_id" IS NULL) = ("recurring_period" IS NULL)')
 @Check('("source" = \'recurring\') = ("recurring_transaction_id" IS NOT NULL)')
+@Check('("source" = \'bank_import\') = ("bank_account_id" IS NOT NULL)')
+@Check('"original_description" IS NULL OR char_length("original_description") <= 255')
 export class TransactionEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -78,8 +81,18 @@ export class TransactionEntity {
   @Column({ name: 'external_id', type: 'text', nullable: true })
   externalId!: string | null;
 
+  @ManyToOne(() => BankAccountEntity, (bankAccount) => bankAccount.transactions, {
+    nullable: true,
+    onDelete: 'RESTRICT',
+  })
+  @JoinColumn({ name: 'bank_account_id' })
+  bankAccount!: BankAccountEntity | null;
+
   @Column({ type: 'text', nullable: true })
   description!: string | null;
+
+  @Column({ name: 'original_description', type: 'text', nullable: true })
+  originalDescription!: string | null;
 
   @ManyToOne(
     () => RecurringTransactionEntity,

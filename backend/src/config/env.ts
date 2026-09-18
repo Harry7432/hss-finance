@@ -4,6 +4,7 @@ const DEFAULT_PORT = 3000;
 const DEFAULT_FRONTEND_ORIGIN = 'http://localhost:5173';
 const DEFAULT_DATABASE_URL = 'postgresql://hss_finance:hss_finance_dev@localhost:5433/hss_finance';
 const DEFAULT_PLUGGY_BASE_URL = 'https://api.pluggy.ai';
+const DEFAULT_ASAAS_BASE_URL = 'https://api-sandbox.asaas.com/v3';
 const NODE_ENVIRONMENTS = ['development', 'test', 'production'] as const;
 
 type NodeEnvironment = (typeof NODE_ENVIRONMENTS)[number];
@@ -104,6 +105,22 @@ export function parsePluggyBaseUrl(value: string | undefined): string {
   return baseUrl;
 }
 
+export function parseAsaasBaseUrl(value: string | undefined): string {
+  // Fail-closed by design: this stage of the project only ever talks to the official
+  // Asaas Sandbox. Rather than validating URL shape (protocol/host/path independently),
+  // require an exact match against the Sandbox origin so no other host — including a
+  // convincing lookalike such as "api-sandbox.asaas.com.evil.com" — is ever accepted.
+  const baseUrl = value && value.length > 0 ? value : DEFAULT_ASAAS_BASE_URL;
+
+  if (baseUrl !== DEFAULT_ASAAS_BASE_URL) {
+    throw new Error(
+      `ASAAS_BASE_URL must be exactly ${DEFAULT_ASAAS_BASE_URL} (Sandbox-only at this stage).`,
+    );
+  }
+
+  return baseUrl;
+}
+
 function parseOptionalSecret(value: string | undefined): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
@@ -138,4 +155,8 @@ export const env = Object.freeze({
   pluggyClientId: parseOptionalSecret(process.env.PLUGGY_CLIENT_ID),
   pluggyClientSecret: parseOptionalSecret(process.env.PLUGGY_CLIENT_SECRET),
   pluggyBaseUrl: parsePluggyBaseUrl(process.env.PLUGGY_BASE_URL),
+  // Asaas Sandbox integration (Slice A): client reads getBalance only, not wired into
+  // app routes yet. ASAAS_API_KEY is optional so boot/tests keep working without it.
+  asaasApiKey: parseOptionalSecret(process.env.ASAAS_API_KEY),
+  asaasBaseUrl: parseAsaasBaseUrl(process.env.ASAAS_BASE_URL),
 });

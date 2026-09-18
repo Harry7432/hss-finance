@@ -1,5 +1,6 @@
 import { parseJwtSecret } from '../src/config/jwt.js';
 import {
+  parseAsaasBaseUrl,
   parseFrontendOrigin,
   parseNodeEnvironment,
   parsePluggyBaseUrl,
@@ -86,6 +87,39 @@ describe('Pluggy base URL configuration', () => {
   ])('rejects a non-canonical or insecure base URL: %s', (baseUrl) => {
     expect(() => parsePluggyBaseUrl(baseUrl)).toThrow(
       'PLUGGY_BASE_URL must be a valid HTTPS origin without a path.',
+    );
+  });
+});
+
+describe('Asaas base URL configuration', () => {
+  it('defaults to the Asaas Sandbox API when unset or empty', () => {
+    expect(parseAsaasBaseUrl(undefined)).toBe('https://api-sandbox.asaas.com/v3');
+    expect(parseAsaasBaseUrl('')).toBe('https://api-sandbox.asaas.com/v3');
+  });
+
+  it('accepts the exact official Sandbox base URL when set explicitly', () => {
+    expect(parseAsaasBaseUrl('https://api-sandbox.asaas.com/v3')).toBe(
+      'https://api-sandbox.asaas.com/v3',
+    );
+  });
+
+  it.each([
+    'http://api-sandbox.asaas.com/v3',
+    'https://user:password@api-sandbox.asaas.com/v3',
+    'https://api-sandbox.asaas.com',
+    'https://api-sandbox.asaas.com/',
+    'https://api-sandbox.asaas.com/v3/',
+    'https://api-sandbox.asaas.com/v3/payments',
+    'https://api-sandbox.asaas.com/v3?query=true',
+    'https://api-sandbox.asaas.com/v3#fragment',
+    'https://evil.example.com/v3',
+    'https://api-sandbox.asaas.com.evil.com/v3',
+    'https://api.asaas.com/v3',
+    'https://api-sandbox.asaas.com/v4',
+    'not-a-url',
+  ])('rejects anything other than the exact official Sandbox base URL: %s', (baseUrl) => {
+    expect(() => parseAsaasBaseUrl(baseUrl)).toThrow(
+      'ASAAS_BASE_URL must be exactly https://api-sandbox.asaas.com/v3 (Sandbox-only at this stage).',
     );
   });
 });

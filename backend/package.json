@@ -15,6 +15,7 @@
     "migration:revert": "tsx src/database/scripts/migrate.ts revert",
     "migration:show": "tsx src/database/scripts/migrate.ts show",
     "validate:pluggy-sandbox": "tsx scripts/validate-pluggy-sandbox.ts",
+    "validate:asaas-sandbox": "tsx scripts/validate-asaas-sandbox.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js",
     "test:watch": "node --experimental-vm-modules ../node_modules/jest/bin/jest.js --watch",

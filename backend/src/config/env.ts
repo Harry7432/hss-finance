@@ -155,8 +155,9 @@ export const env = Object.freeze({
   pluggyClientId: parseOptionalSecret(process.env.PLUGGY_CLIENT_ID),
   pluggyClientSecret: parseOptionalSecret(process.env.PLUGGY_CLIENT_SECRET),
   pluggyBaseUrl: parsePluggyBaseUrl(process.env.PLUGGY_BASE_URL),
-  // Asaas Sandbox integration (Slice A): client reads getBalance only, not wired into
-  // app routes yet. ASAAS_API_KEY is optional so boot/tests keep working without it.
+  // Asaas Sandbox integration. ASAAS_API_KEY is optional so boot/tests keep working
+  // without it; routes that depend on it (e.g. bill payment simulation) return 503 when
+  // it's unset instead of failing to boot.
   asaasApiKey: parseOptionalSecret(process.env.ASAAS_API_KEY),
   asaasBaseUrl: parseAsaasBaseUrl(process.env.ASAAS_BASE_URL),
 });

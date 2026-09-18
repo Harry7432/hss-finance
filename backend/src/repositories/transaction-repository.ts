@@ -6,6 +6,7 @@ import { TransactionEntity } from '../database/entities/transaction.entity.js';
 import { ForbiddenError } from '../errors/forbidden-error.js';
 import { InvalidCategoryError } from '../errors/invalid-category-error.js';
 import { InvalidExpenseNatureError } from '../errors/invalid-expense-nature-error.js';
+import { TransactionAlreadyPaidError } from '../errors/transaction-already-paid-error.js';
 import { TransactionNotFoundError } from '../errors/transaction-not-found-error.js';
 
 export type TransactionType = 'income' | 'expense';
@@ -148,6 +149,12 @@ export interface DeleteTransactionData {
   transactionId: string;
 }
 
+export interface FindPendingTransactionAsOwnerData {
+  householdId: string;
+  requesterId: string;
+  transactionId: string;
+}
+
 export interface TransactionRepository {
   createAsMember(data: CreateTransactionData): Promise<TransactionRecord>;
   listAsMember(data: ListTransactionsData): Promise<ListTransactionsResult>;
@@ -161,6 +168,7 @@ export interface TransactionRepository {
   ): Promise<HouseholdMonthlySummaryEntry[]>;
   updateAsMember(data: UpdateTransactionData): Promise<TransactionRecord>;
   deleteAsMember(data: DeleteTransactionData): Promise<void>;
+  findPendingAsOwner(data: FindPendingTransactionAsOwnerData): Promise<TransactionRecord>;
 }
 
 interface TransactionRow {
@@ -515,6 +523,70 @@ export class TypeOrmTransactionRepository implements TransactionRepository {
       }
 
       await manager.remove(transaction);
+    });
+  }
+
+  async findPendingAsOwner(data: FindPendingTransactionAsOwnerData): Promise<TransactionRecord> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true, role: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (membership?.role !== 'owner') {
+      throw new ForbiddenError();
+    }
+
+    const transaction = await this.dataSource.getRepository(TransactionEntity).findOne({
+      select: {
+        id: true,
+        type: true,
+        amount: true,
+        transactionDate: true,
+        dueDate: true,
+        description: true,
+        status: true,
+        paidAt: true,
+        source: true,
+        expenseNature: true,
+        recurringPeriod: true,
+        createdAt: true,
+        updatedAt: true,
+        category: { id: true },
+        createdBy: { id: true },
+        recurringTransaction: { id: true },
+      },
+      relations: { category: true, createdBy: true, recurringTransaction: true },
+      where: { id: data.transactionId, household: { id: data.householdId } },
+    });
+
+    if (!transaction) {
+      throw new TransactionNotFoundError();
+    }
+
+    if (transaction.status !== 'pending') {
+      throw new TransactionAlreadyPaidError();
+    }
+
+    return toTransactionRecord({
+      id: transaction.id,
+      type: transaction.type,
+      amount: transaction.amount,
+      transactionDate: transaction.transactionDate,
+      dueDate: transaction.dueDate,
+      categoryId: transaction.category?.id ?? null,
+      description: transaction.description,
+      status: transaction.status,
+      paidAt: transaction.paidAt,
+      source: transaction.source,
+      expenseNature: transaction.expenseNature,
+      recurringTransactionId: transaction.recurringTransaction?.id ?? null,
+      recurringPeriod: transaction.recurringPeriod,
+      createdBy: transaction.createdBy.id,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
     });
   }
 

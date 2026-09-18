@@ -1,4 +1,5 @@
-export type AsaasClientErrorCode = 'authentication' | 'rate_limit' | 'unavailable' | 'unknown';
+export type AsaasClientErrorCode =
+  'authentication' | 'rate_limit' | 'unavailable' | 'invalid_request' | 'unknown';
 
 export interface AsaasClientErrorInput {
   code: AsaasClientErrorCode;

@@ -52,6 +52,47 @@ interface AsaasFinancialTransactionPageResponse {
   limit: number;
 }
 
+export interface AsaasSimulateBillPaymentInput {
+  identificationField: string;
+}
+
+export interface AsaasBillSimulation {
+  value: number;
+  dueDate: string;
+  originalValue: number | null;
+  isOverdue: boolean | null;
+  allowChangeValue: boolean | null;
+  minValue: number | null;
+  maxValue: number | null;
+  beneficiaryName: string | null;
+  companyName: string | null;
+  fee: number | null;
+  minimumScheduleDate: string | null;
+}
+
+// Only `value` and `dueDate` are indispensable to our domain (there is no useful
+// simulation without them). The Asaas OpenAPI contract does not mark any other field
+// here as required, so everything else is optional/nullable — treating them as
+// mandatory previously meant a legitimate 200 could be rejected as `unknown` just
+// because Asaas omitted a field our type guard assumed was always present.
+interface AsaasBillSimulationBankSlipInfoResponse {
+  value: number;
+  dueDate: string;
+  originalValue: number | null | undefined;
+  isOverdue: boolean | null | undefined;
+  allowChangeValue: boolean | null | undefined;
+  minValue: number | null | undefined;
+  maxValue: number | null | undefined;
+  beneficiaryName: string | null | undefined;
+  companyName: string | null | undefined;
+}
+
+interface AsaasBillSimulationResponse {
+  fee: number | null | undefined;
+  minimumScheduleDate: string | null | undefined;
+  bankSlipInfo: AsaasBillSimulationBankSlipInfoResponse;
+}
+
 const ASAAS_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function classifyAsaasError(status: number): AsaasClientErrorCode {
@@ -93,6 +134,10 @@ function isOptionalNullableFiniteNumber(value: unknown): value is number | null 
   );
 }
 
+function isOptionalNullableBoolean(value: unknown): value is boolean | null | undefined {
+  return value === undefined || value === null || typeof value === 'boolean';
+}
+
 function isAsaasFinancialTransaction(item: unknown): item is AsaasFinancialTransaction {
   if (item === null || typeof item !== 'object') return false;
 
@@ -109,6 +154,40 @@ function isAsaasFinancialTransaction(item: unknown): item is AsaasFinancialTrans
     isOptionalNullableString(record.paymentId) &&
     isOptionalNullableString(record.transferId) &&
     isOptionalNullableString(record.billId)
+  );
+}
+
+function isAsaasBillSimulationBankSlipInfo(
+  value: unknown,
+): value is AsaasBillSimulationBankSlipInfoResponse {
+  if (value === null || typeof value !== 'object') return false;
+
+  const record = value as Record<string, unknown>;
+
+  return (
+    typeof record.value === 'number' &&
+    Number.isFinite(record.value) &&
+    typeof record.dueDate === 'string' &&
+    record.dueDate.length > 0 &&
+    isOptionalNullableFiniteNumber(record.originalValue) &&
+    isOptionalNullableBoolean(record.isOverdue) &&
+    isOptionalNullableBoolean(record.allowChangeValue) &&
+    isOptionalNullableFiniteNumber(record.minValue) &&
+    isOptionalNullableFiniteNumber(record.maxValue) &&
+    isOptionalNullableString(record.beneficiaryName) &&
+    isOptionalNullableString(record.companyName)
+  );
+}
+
+function isAsaasBillSimulationResponse(data: unknown): data is AsaasBillSimulationResponse {
+  if (data === null || typeof data !== 'object') return false;
+
+  const record = data as Record<string, unknown>;
+
+  return (
+    isOptionalNullableFiniteNumber(record.fee) &&
+    isOptionalNullableString(record.minimumScheduleDate) &&
+    isAsaasBillSimulationBankSlipInfo(record.bankSlipInfo)
   );
 }
 
@@ -224,6 +303,50 @@ export class AsaasClient {
     };
   }
 
+  async simulateBillPayment(input: AsaasSimulateBillPaymentInput): Promise<AsaasBillSimulation> {
+    const identificationField = input.identificationField.trim();
+
+    if (identificationField.length === 0) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill simulation requires a non-empty identificationField',
+      });
+    }
+
+    const response = await this.rawFetch('/bill/simulate', {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify({ identificationField }),
+    });
+
+    if (!response.ok) {
+      throw await this.toBillSimulationClientError(response);
+    }
+
+    const data = await this.parseJson<unknown>(response);
+
+    if (!isAsaasBillSimulationResponse(data)) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill simulation response had an unexpected shape',
+      });
+    }
+
+    return {
+      value: data.bankSlipInfo.value,
+      dueDate: data.bankSlipInfo.dueDate,
+      originalValue: data.bankSlipInfo.originalValue ?? null,
+      isOverdue: data.bankSlipInfo.isOverdue ?? null,
+      allowChangeValue: data.bankSlipInfo.allowChangeValue ?? null,
+      minValue: data.bankSlipInfo.minValue ?? null,
+      maxValue: data.bankSlipInfo.maxValue ?? null,
+      beneficiaryName: data.bankSlipInfo.beneficiaryName ?? null,
+      companyName: data.bankSlipInfo.companyName ?? null,
+      fee: data.fee ?? null,
+      minimumScheduleDate: data.minimumScheduleDate ?? null,
+    };
+  }
+
   private buildFinancialTransactionsQuery(options?: AsaasListFinancialTransactionsOptions): string {
     if (!options) return '';
 
@@ -324,5 +447,20 @@ export class AsaasClient {
       code: classifyAsaasError(response.status),
       message: `Asaas request failed with status ${response.status}`,
     });
+  }
+
+  // 400 on /bill/simulate means Asaas rejected the identificationField/barcode itself
+  // (invalid or unrecognized bill) rather than a generic client bug, so it is classified
+  // separately from the shared classifyAsaasError mapping (which the other endpoints don't
+  // expect to see 400 from).
+  private async toBillSimulationClientError(response: Response): Promise<AsaasClientError> {
+    if (response.status === 400) {
+      return new AsaasClientError({
+        code: 'invalid_request',
+        message: 'Asaas rejected the bill simulation request',
+      });
+    }
+
+    return this.toClientError(response);
   }
 }

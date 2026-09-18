@@ -563,6 +563,461 @@ describe('AsaasClient', () => {
     });
   });
 
+  describe('simulateBillPayment', () => {
+    const IDENTIFICATION_FIELD = '03399.77779 29900.000000 04751.101017 1 81510000002990';
+
+    function fullBankSlipInfo(overrides: Partial<Record<string, unknown>> = {}): unknown {
+      return {
+        value: 150,
+        dueDate: '2024-02-10',
+        originalValue: 150,
+        isOverdue: false,
+        allowChangeValue: false,
+        minValue: null,
+        maxValue: null,
+        beneficiaryName: 'Beneficiary Co',
+        companyName: 'Issuer Co',
+        ...overrides,
+      };
+    }
+
+    function simulationResponse(overrides: Partial<Record<string, unknown>> = {}): unknown {
+      return {
+        fee: 1.5,
+        minimumScheduleDate: '2024-02-01',
+        bankSlipInfo: fullBankSlipInfo(),
+        ...overrides,
+      };
+    }
+
+    it('requests POST /bill/simulate authenticated via the access_token header', async () => {
+      const { client, calls } = createClient([jsonResponse(200, simulationResponse())]);
+
+      await client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD });
+
+      expect(calls[0]?.url).toBe('https://sandbox.asaas.test/v3/bill/simulate');
+      expect(calls[0]?.init?.method).toBe('POST');
+      expect(requestHeader(calls[0], 'access_token')).toBe('sandbox-api-key');
+    });
+
+    it('sends the identificationField in the request body', async () => {
+      const { client, calls } = createClient([jsonResponse(200, simulationResponse())]);
+
+      await client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({ identificationField: IDENTIFICATION_FIELD }),
+      );
+    });
+
+    it('trims the identificationField before sending it', async () => {
+      const { client, calls } = createClient([jsonResponse(200, simulationResponse())]);
+
+      await client.simulateBillPayment({ identificationField: `  ${IDENTIFICATION_FIELD}  ` });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({ identificationField: IDENTIFICATION_FIELD }),
+      );
+    });
+
+    it('rejects an empty identificationField before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(client.simulateBillPayment({ identificationField: '' })).rejects.toMatchObject({
+        code: 'unknown',
+      });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a whitespace-only identificationField before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: '   ' }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('returns a normalized simulation for a valid response', async () => {
+      const { client } = createClient([jsonResponse(200, simulationResponse())]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toEqual({
+        value: 150,
+        originalValue: 150,
+        dueDate: '2024-02-10',
+        isOverdue: false,
+        allowChangeValue: false,
+        minValue: null,
+        maxValue: null,
+        beneficiaryName: 'Beneficiary Co',
+        companyName: 'Issuer Co',
+        fee: 1.5,
+        minimumScheduleDate: '2024-02-01',
+      });
+    });
+
+    it('does not include the identificationField in the returned simulation', async () => {
+      const { client } = createClient([jsonResponse(200, simulationResponse())]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(JSON.stringify(result)).not.toContain(IDENTIFICATION_FIELD);
+    });
+
+    it('normalizes missing minValue, maxValue, beneficiaryName and companyName to null', async () => {
+      const { client } = createClient([
+        jsonResponse(
+          200,
+          simulationResponse({
+            bankSlipInfo: {
+              value: 150,
+              dueDate: '2024-02-10',
+              originalValue: 150,
+              isOverdue: false,
+              allowChangeValue: true,
+            },
+          }),
+        ),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toMatchObject({
+        minValue: null,
+        maxValue: null,
+        beneficiaryName: null,
+        companyName: null,
+      });
+    });
+
+    it('normalizes missing originalValue, isOverdue and allowChangeValue to null', async () => {
+      const { client } = createClient([
+        jsonResponse(
+          200,
+          simulationResponse({ bankSlipInfo: { value: 150, dueDate: '2024-02-10' } }),
+        ),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toMatchObject({
+        originalValue: null,
+        isOverdue: null,
+        allowChangeValue: null,
+      });
+    });
+
+    it('normalizes missing top-level fee and minimumScheduleDate to null', async () => {
+      const { client } = createClient([
+        jsonResponse(200, { bankSlipInfo: fullBankSlipInfo() }),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toMatchObject({ fee: null, minimumScheduleDate: null });
+    });
+
+    // Case 1 from the review: the smallest response the real contract allows — only the
+    // two fields our domain actually needs, nothing else present at all.
+    it('accepts a minimal response containing only value and dueDate', async () => {
+      const { client } = createClient([
+        jsonResponse(200, { bankSlipInfo: { value: 100, dueDate: '2024-03-01' } }),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toEqual({
+        value: 100,
+        dueDate: '2024-03-01',
+        originalValue: null,
+        isOverdue: null,
+        allowChangeValue: null,
+        minValue: null,
+        maxValue: null,
+        beneficiaryName: null,
+        companyName: null,
+        fee: null,
+        minimumScheduleDate: null,
+      });
+    });
+
+    it('accepts explicit null for every optional field', async () => {
+      const { client } = createClient([
+        jsonResponse(200, {
+          fee: null,
+          minimumScheduleDate: null,
+          bankSlipInfo: {
+            value: 150,
+            dueDate: '2024-02-10',
+            originalValue: null,
+            isOverdue: null,
+            allowChangeValue: null,
+            minValue: null,
+            maxValue: null,
+            beneficiaryName: null,
+            companyName: null,
+          },
+        }),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result).toEqual({
+        value: 150,
+        dueDate: '2024-02-10',
+        originalValue: null,
+        isOverdue: null,
+        allowChangeValue: null,
+        minValue: null,
+        maxValue: null,
+        beneficiaryName: null,
+        companyName: null,
+        fee: null,
+        minimumScheduleDate: null,
+      });
+    });
+
+    it('passes through a valid originalValue', async () => {
+      const { client } = createClient([
+        jsonResponse(
+          200,
+          simulationResponse({ bankSlipInfo: fullBankSlipInfo({ originalValue: 175.5 }) }),
+        ),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result.originalValue).toBe(175.5);
+    });
+
+    it('passes through a valid fee', async () => {
+      const { client } = createClient([jsonResponse(200, simulationResponse({ fee: 3.25 }))]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result.fee).toBe(3.25);
+    });
+
+    it.each([true, false])('passes through a valid isOverdue (%s)', async (isOverdue) => {
+      const { client } = createClient([
+        jsonResponse(200, simulationResponse({ bankSlipInfo: fullBankSlipInfo({ isOverdue }) })),
+      ]);
+
+      const result = await client.simulateBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+      });
+
+      expect(result.isOverdue).toBe(isOverdue);
+    });
+
+    it.each([true, false])(
+      'passes through a valid allowChangeValue (%s)',
+      async (allowChangeValue) => {
+        const { client } = createClient([
+          jsonResponse(
+            200,
+            simulationResponse({ bankSlipInfo: fullBankSlipInfo({ allowChangeValue }) }),
+          ),
+        ]);
+
+        const result = await client.simulateBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+        });
+
+        expect(result.allowChangeValue).toBe(allowChangeValue);
+      },
+    );
+
+    it.each(['originalValue', 'fee', 'minValue', 'maxValue'])(
+      'maps an optional number field (%s) with a string value to unknown',
+      async (field) => {
+        const overrides =
+          field === 'fee'
+            ? { fee: 'not-a-number' }
+            : { bankSlipInfo: fullBankSlipInfo({ [field]: 'not-a-number' }) };
+        const { client } = createClient([jsonResponse(200, simulationResponse(overrides))]);
+
+        await expect(
+          client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+        ).rejects.toMatchObject({ code: 'unknown' });
+      },
+    );
+
+    it.each(['isOverdue', 'allowChangeValue'])(
+      'maps an optional boolean field (%s) with a non-boolean value to unknown',
+      async (field) => {
+        const { client } = createClient([
+          jsonResponse(
+            200,
+            simulationResponse({ bankSlipInfo: fullBankSlipInfo({ [field]: 'true' }) }),
+          ),
+        ]);
+
+        await expect(
+          client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+        ).rejects.toMatchObject({ code: 'unknown' });
+      },
+    );
+
+    it('maps a response missing value to unknown', async () => {
+      const { client } = createClient([
+        jsonResponse(200, simulationResponse({ bankSlipInfo: { dueDate: '2024-02-10' } })),
+      ]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it.each(['not-a-number', NaN, Infinity, -Infinity])(
+      'maps an invalid value (%s) to unknown',
+      async (value) => {
+        const { client } = createClient([
+          jsonResponse(200, simulationResponse({ bankSlipInfo: fullBankSlipInfo({ value }) })),
+        ]);
+
+        await expect(
+          client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+        ).rejects.toMatchObject({ code: 'unknown' });
+      },
+    );
+
+    it('maps a response missing dueDate to unknown', async () => {
+      const { client } = createClient([
+        jsonResponse(200, simulationResponse({ bankSlipInfo: { value: 150 } })),
+      ]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it.each(['', 20240210, null])('maps an invalid dueDate (%s) to unknown', async (dueDate) => {
+      const { client } = createClient([
+        jsonResponse(200, simulationResponse({ bankSlipInfo: fullBankSlipInfo({ dueDate }) })),
+      ]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('maps a response missing bankSlipInfo entirely to unknown', async () => {
+      const { client } = createClient([
+        jsonResponse(200, { fee: 1, minimumScheduleDate: '2024-02-01' }),
+      ]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('maps a 400 (invalid bill) response to invalid_request', async () => {
+      const { client } = createClient([
+        jsonResponse(400, { errors: [{ code: 'invalid_billet', description: 'Invalid bill' }] }),
+      ]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    });
+
+    it('never includes the identificationField in a 400 error message', async () => {
+      const { client } = createClient([jsonResponse(400, { errors: [] })]);
+
+      let thrown: unknown;
+      try {
+        await client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(AsaasClientError);
+      expect((thrown as Error).message).not.toContain(IDENTIFICATION_FIELD);
+    });
+
+    it.each([401, 403])('maps status %d to authentication', async (status) => {
+      const { client } = createClient([jsonResponse(status, { errors: [] })]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'authentication' });
+    });
+
+    it('maps 429 to rate_limit', async () => {
+      const { client } = createClient([jsonResponse(429, { errors: [] })]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'rate_limit' });
+    });
+
+    it.each([500, 502, 503])('maps status %d to unavailable', async (status) => {
+      const { client } = createClient([jsonResponse(status, {})]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unavailable' });
+    });
+
+    it('maps an unparsable JSON response to unknown', async () => {
+      const badResponse = {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error('invalid json');
+        },
+      } as unknown as Response;
+      const { client } = createClient([badResponse]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('maps an unexpected response shape to unknown', async () => {
+      const { client } = createClient([jsonResponse(200, { bankSlipInfo: {} })]);
+
+      await expect(
+        client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('never exposes the API key in the error message', async () => {
+      const { client } = createClient([jsonResponse(401, { errors: [] })]);
+
+      let thrown: unknown;
+      try {
+        await client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(AsaasClientError);
+      expect((thrown as Error).message).not.toContain(CONFIG.apiKey);
+    });
+  });
+
   describe('secret leakage', () => {
     it.each([401, 429, 500])(
       'never exposes the API key in the error message for status %d',

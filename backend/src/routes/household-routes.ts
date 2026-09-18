@@ -23,6 +23,7 @@ import { GetHouseholdUserSummaryService } from '../services/get-household-user-s
 import { ListHouseholdMembersService } from '../services/list-household-members-service.js';
 import { ListHouseholdsService } from '../services/list-households-service.js';
 import type { TodayProvider } from '../services/list-transactions-service.js';
+import type { BillSimulationClient } from '../services/simulate-bill-payment-service.js';
 import { createCategoryRouter } from './category-routes.js';
 import { createRecurringTransactionRouter } from './recurring-transaction-routes.js';
 import { createTransactionRouter } from './transaction-routes.js';
@@ -35,6 +36,7 @@ export function createHouseholdRouter(
   transactions: TransactionRepository,
   recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
+  asaasClient?: BillSimulationClient,
 ): Router {
   const householdRouter = Router();
   const addHouseholdMember = new AddHouseholdMemberService(households, users);
@@ -55,7 +57,7 @@ export function createHouseholdRouter(
   );
   householdRouter.use(
     '/:householdId/transactions',
-    createTransactionRouter(transactions, jwtSecret, todayProvider),
+    createTransactionRouter(transactions, jwtSecret, todayProvider, asaasClient),
   );
   householdRouter.use(
     '/:householdId/recurring-transactions',

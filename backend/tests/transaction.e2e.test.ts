@@ -17,6 +17,7 @@ import { TransactionEntity } from '../src/database/entities/transaction.entity.j
 import { ForbiddenError } from '../src/errors/forbidden-error.js';
 import { InvalidCategoryError } from '../src/errors/invalid-category-error.js';
 import { InvalidExpenseNatureError } from '../src/errors/invalid-expense-nature-error.js';
+import { TransactionAlreadyPaidError } from '../src/errors/transaction-already-paid-error.js';
 import { TransactionNotFoundError } from '../src/errors/transaction-not-found-error.js';
 import type {
   CategoryRecord,
@@ -46,6 +47,7 @@ import {
   TypeOrmTransactionRepository,
   type CreateTransactionData,
   type DeleteTransactionData,
+  type FindPendingTransactionAsOwnerData,
   type GetHouseholdCategorySummaryData,
   type GetHouseholdMonthlySummaryData,
   type GetHouseholdSummaryData,
@@ -725,6 +727,31 @@ class InMemoryTransactionRepository implements TransactionRepository {
     }
 
     this.records.splice(index, 1);
+  }
+
+  async findPendingAsOwner(data: FindPendingTransactionAsOwnerData): Promise<TransactionRecord> {
+    const membership = this.memberships.find(
+      (candidate) =>
+        candidate.householdId === data.householdId && candidate.userId === data.requesterId,
+    );
+
+    if (membership?.role !== 'owner') {
+      throw new ForbiddenError();
+    }
+
+    const transaction = this.records.find(
+      (record) => record.id === data.transactionId && record.householdId === data.householdId,
+    );
+
+    if (!transaction) {
+      throw new TransactionNotFoundError();
+    }
+
+    if (transaction.status !== 'pending') {
+      throw new TransactionAlreadyPaidError();
+    }
+
+    return transaction;
   }
 }
 

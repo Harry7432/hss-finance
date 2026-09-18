@@ -45,6 +45,7 @@ import {
 import type {
   CreateTransactionData,
   DeleteTransactionData,
+  FindPendingTransactionAsOwnerData,
   GetHouseholdCategorySummaryData,
   GetHouseholdMonthlySummaryData,
   GetHouseholdSummaryData,
@@ -186,6 +187,10 @@ class StubTransactionRepository implements TransactionRepository {
   }
 
   async deleteAsMember(_data: DeleteTransactionData): Promise<void> {}
+
+  async findPendingAsOwner(_data: FindPendingTransactionAsOwnerData): Promise<TransactionRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
 }
 
 function toMonthIndexForTest(year: number, month: number): number {

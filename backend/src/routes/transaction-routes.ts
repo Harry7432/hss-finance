@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { createTransactionController } from '../controllers/create-transaction-controller.js';
 import { deleteTransactionController } from '../controllers/delete-transaction-controller.js';
 import { listTransactionsController } from '../controllers/list-transactions-controller.js';
+import { simulateBillPaymentController } from '../controllers/simulate-bill-payment-controller.js';
 import { updateTransactionController } from '../controllers/update-transaction-controller.js';
 import { createAuthenticationMiddleware } from '../middleware/authenticate.js';
 import type { TransactionRepository } from '../repositories/transaction-repository.js';
@@ -12,18 +13,24 @@ import {
   ListTransactionsService,
   type TodayProvider,
 } from '../services/list-transactions-service.js';
+import type { BillSimulationClient } from '../services/simulate-bill-payment-service.js';
+import { SimulateBillPaymentService } from '../services/simulate-bill-payment-service.js';
 import { UpdateTransactionService } from '../services/update-transaction-service.js';
 
 export function createTransactionRouter(
   transactions: TransactionRepository,
   jwtSecret: Uint8Array,
   todayProvider?: TodayProvider,
+  asaasClient?: BillSimulationClient,
 ): Router {
   const transactionRouter = Router({ mergeParams: true });
   const createTransaction = new CreateTransactionService(transactions);
   const deleteTransaction = new DeleteTransactionService(transactions);
   const listTransactions = new ListTransactionsService(transactions, todayProvider);
   const updateTransaction = new UpdateTransactionService(transactions);
+  const simulateBillPayment = asaasClient
+    ? new SimulateBillPaymentService(transactions, asaasClient)
+    : undefined;
   const authenticate = createAuthenticationMiddleware(jwtSecret);
 
   transactionRouter.get('/', authenticate, listTransactionsController(listTransactions));
@@ -40,6 +47,12 @@ export function createTransactionRouter(
     '/:transactionId',
     authenticate,
     deleteTransactionController(deleteTransaction),
+  );
+
+  transactionRouter.post(
+    '/:transactionId/payment/bill/simulate',
+    authenticate,
+    simulateBillPaymentController(simulateBillPayment),
   );
 
   return transactionRouter;

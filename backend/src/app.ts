@@ -7,6 +7,7 @@ import { jwtConfig } from './config/jwt.js';
 import { databaseReadiness, type DatabaseReadiness } from './database/database-readiness.js';
 import { appDataSource } from './database/data-source.js';
 import { UserEntity } from './database/entities/user.entity.js';
+import { AsaasClient } from './integrations/asaas/asaas-client.js';
 import { errorHandler } from './middleware/error-handler.js';
 import {
   TypeOrmCategoryRepository,
@@ -27,6 +28,7 @@ import {
 import { TypeOrmUserRepository, type UserRepository } from './repositories/user-repository.js';
 import { createApiRouter } from './routes/index.js';
 import type { TodayProvider } from './services/list-transactions-service.js';
+import type { BillSimulationClient } from './services/simulate-bill-payment-service.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
@@ -34,6 +36,11 @@ const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
 const transactionRepository = new TypeOrmTransactionRepository(appDataSource);
 const recurringTransactionRepository = new TypeOrmRecurringTransactionRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
+// Undefined when ASAAS_API_KEY isn't set, so the app still boots (Sandbox-only, key is
+// optional at this stage); routes that need it degrade to a 503 instead of crashing.
+const defaultAsaasClient = env.asaasApiKey
+  ? new AsaasClient({ apiKey: env.asaasApiKey, baseUrl: env.asaasBaseUrl })
+  : undefined;
 
 export function createApp(
   database: DatabaseReadiness = databaseReadiness,
@@ -44,6 +51,7 @@ export function createApp(
   transactions: TransactionRepository = transactionRepository,
   recurringTransactions: RecurringTransactionRepository = recurringTransactionRepository,
   todayProvider?: TodayProvider,
+  asaasClient: BillSimulationClient | undefined = defaultAsaasClient,
 ): Express {
   const app = express();
 
@@ -69,6 +77,7 @@ export function createApp(
       recurringTransactions,
       todayProvider,
       env.secureCookies,
+      asaasClient,
     ),
   );
   app.use(errorHandler);

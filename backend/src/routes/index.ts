@@ -7,6 +7,7 @@ import type { RecurringTransactionRepository } from '../repositories/recurring-t
 import type { TransactionRepository } from '../repositories/transaction-repository.js';
 import type { UserRepository } from '../repositories/user-repository.js';
 import type { TodayProvider } from '../services/list-transactions-service.js';
+import type { BillSimulationClient } from '../services/simulate-bill-payment-service.js';
 import { createAuthRouter } from './auth-routes.js';
 import { createHealthRouter } from './health-routes.js';
 import { createHouseholdRouter } from './household-routes.js';
@@ -21,6 +22,7 @@ export function createApiRouter(
   recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
   secureCookie = false,
+  asaasClient?: BillSimulationClient,
 ): Router {
   const apiRouter = Router();
 
@@ -36,6 +38,7 @@ export function createApiRouter(
       transactions,
       recurringTransactions,
       todayProvider,
+      asaasClient,
     ),
   );
 

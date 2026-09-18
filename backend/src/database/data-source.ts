@@ -8,6 +8,7 @@ import { BankConnectionEntity } from './entities/bank-connection.entity.js';
 import { CategoryEntity } from './entities/category.entity.js';
 import { HouseholdMemberEntity } from './entities/household-member.entity.js';
 import { HouseholdEntity } from './entities/household.entity.js';
+import { PaymentAttemptEntity } from './entities/payment-attempt.entity.js';
 import { RecurringTransactionEntity } from './entities/recurring-transaction.entity.js';
 import { TransactionEntity } from './entities/transaction.entity.js';
 import { UserEntity } from './entities/user.entity.js';
@@ -17,6 +18,7 @@ import { AddRecurringTransactions1789370000000 } from './migrations/178937000000
 import { CreateBankConnections1789380000000 } from './migrations/1789380000000-create-bank-connections.js';
 import { CreateBankAccounts1789390000000 } from './migrations/1789390000000-create-bank-accounts.js';
 import { AddBankAccountToTransactions1789400000000 } from './migrations/1789400000000-add-bank-account-to-transactions.js';
+import { CreatePaymentAttempts1789410000000 } from './migrations/1789410000000-create-payment-attempts.js';
 
 export const appDataSource = new DataSource({
   type: 'postgres',
@@ -32,6 +34,7 @@ export const appDataSource = new DataSource({
     RecurringTransactionEntity,
     BankConnectionEntity,
     BankAccountEntity,
+    PaymentAttemptEntity,
   ],
   migrations: [
     CreateInitialDomain1789300800000,
@@ -40,6 +43,7 @@ export const appDataSource = new DataSource({
     CreateBankConnections1789380000000,
     CreateBankAccounts1789390000000,
     AddBankAccountToTransactions1789400000000,
+    CreatePaymentAttempts1789410000000,
   ],
   subscribers: [],
   uuidExtension: 'pgcrypto',

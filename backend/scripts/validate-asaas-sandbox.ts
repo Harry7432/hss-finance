@@ -70,6 +70,16 @@ try {
   fail('GET /finance/balance', describeError(error));
 }
 
+try {
+  const page = await client.listFinancialTransactions();
+  ok(
+    'GET /financialTransactions',
+    `itens=${page.data.length}, totalCount=${page.totalCount}, hasMore=${page.hasMore}`,
+  );
+} catch (error) {
+  fail('GET /financialTransactions', describeError(error));
+}
+
 if (failed) {
   console.error('\nValidação concluída com falhas.');
   process.exit(1);

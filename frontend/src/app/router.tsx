@@ -2,6 +2,7 @@ import { createBrowserRouter, Outlet, type RouteObject } from 'react-router';
 
 import { RequireAuth } from '../auth/require-auth';
 import { AppShell } from '../components/app-shell/app-shell';
+import { AsaasPage } from '../pages/asaas/asaas-page';
 import { CategoriesPage } from '../pages/categories/categories-page';
 import { DashboardPage } from '../pages/dashboard/dashboard-page';
 import { FamilyPage } from '../pages/family/family-page';
@@ -10,6 +11,7 @@ import { LoginPage } from '../pages/login/login-page';
 import { NotFoundPage } from '../pages/not-found/not-found-page';
 import { RegisterPage } from '../pages/register/register-page';
 import { RouteErrorPage } from '../pages/route-error/route-error-page';
+import { PayWithAsaasPage } from '../pages/transactions/pay-with-asaas-page';
 import { TransactionsPage } from '../pages/transactions/transactions-page';
 
 export const appRoutes: RouteObject[] = [
@@ -45,12 +47,20 @@ export const appRoutes: RouteObject[] = [
                 element: <TransactionsPage />,
               },
               {
+                path: 'app/transactions/:transactionId/pay',
+                element: <PayWithAsaasPage />,
+              },
+              {
                 path: 'app/categories',
                 element: <CategoriesPage />,
               },
               {
                 path: 'app/family',
                 element: <FamilyPage />,
+              },
+              {
+                path: 'app/asaas',
+                element: <AsaasPage />,
               },
             ],
           },

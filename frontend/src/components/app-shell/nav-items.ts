@@ -8,4 +8,5 @@ export const navItems: NavItem[] = [
   { label: 'Lançamentos', to: '/app/transactions' },
   { label: 'Categorias', to: '/app/categories' },
   { label: 'Família', to: '/app/family' },
+  { label: 'Conta Asaas', to: '/app/asaas' },
 ];

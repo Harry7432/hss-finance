@@ -34,8 +34,8 @@ import {
   type TransactionRepository,
 } from './repositories/transaction-repository.js';
 import { TypeOrmUserRepository, type UserRepository } from './repositories/user-repository.js';
+import type { AsaasIntegrationClient } from './routes/household-routes.js';
 import { createApiRouter } from './routes/index.js';
-import type { AsaasBillOperationsClient } from './routes/transaction-routes.js';
 import type { TodayProvider } from './services/list-transactions-service.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
@@ -62,7 +62,7 @@ export function createApp(
   paymentAttempts: PaymentAttemptRepository = paymentAttemptRepository,
   recurringTransactions: RecurringTransactionRepository = recurringTransactionRepository,
   todayProvider?: TodayProvider,
-  asaasClient: AsaasBillOperationsClient | undefined = defaultAsaasClient,
+  asaasClient: AsaasIntegrationClient | undefined = defaultAsaasClient,
   asaasWebhooks: AsaasWebhookRepository = asaasWebhookRepository,
   asaasWebhookToken: string | undefined = env.asaasWebhookToken,
 ): Express {

@@ -55,6 +55,7 @@ import {
   type CreateTransactionData,
   type DeleteTransactionData,
   type FindPendingTransactionAsOwnerData,
+  type FindTransactionAsMemberData,
   type GetHouseholdCategorySummaryData,
   type GetHouseholdMonthlySummaryData,
   type GetHouseholdSummaryData,
@@ -225,6 +226,10 @@ class StubPaymentAttemptRepository implements PaymentAttemptRepository {
   }
 
   async markUncertain(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in transaction tests.');
+  }
+
+  async findLatestForTransactionAsMember(): Promise<PaymentAttemptRecord | null> {
     throw new Error('Not implemented in transaction tests.');
   }
 }
@@ -777,6 +782,10 @@ class InMemoryTransactionRepository implements TransactionRepository {
     }
 
     return transaction;
+  }
+
+  async findByIdAsMember(_data: FindTransactionAsMemberData): Promise<TransactionRecord> {
+    throw new Error('Not implemented in transaction tests.');
   }
 }
 

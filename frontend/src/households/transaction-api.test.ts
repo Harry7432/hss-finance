@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createTransaction, listTransactions, transactionsQueryKey } from './transaction-api';
+import {
+  createTransaction,
+  getTransaction,
+  listTransactions,
+  transactionsQueryKey,
+} from './transaction-api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -287,5 +292,51 @@ describe('createTransaction', () => {
         categoryId: '33333333-3333-4333-8333-333333333333',
       }),
     ).rejects.toMatchObject({ status: 400, code: 'INVALID_CATEGORY' });
+  });
+});
+
+describe('getTransaction', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const TRANSACTION_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    fetchMock.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  it('requests the single-transaction endpoint and returns the parsed record', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          id: TRANSACTION_ID,
+          type: 'expense',
+          amount: '200.00',
+          transactionDate: '2026-09-01',
+          dueDate: '2026-09-23',
+          categoryId: null,
+          description: 'Conta de luz',
+          status: 'pending',
+        },
+      }),
+    );
+
+    const transaction = await getTransaction(HOUSEHOLD_ID, TRANSACTION_ID);
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `http://localhost:3000/api/households/${HOUSEHOLD_ID}/transactions/${TRANSACTION_ID}`,
+    );
+    expect(transaction.status).toBe('pending');
+  });
+
+  it('rejects with ApiError when the response does not match the expected shape', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: { id: TRANSACTION_ID } }));
+
+    await expect(getTransaction(HOUSEHOLD_ID, TRANSACTION_ID)).rejects.toMatchObject({
+      code: 'INVALID_RESPONSE',
+    });
   });
 });

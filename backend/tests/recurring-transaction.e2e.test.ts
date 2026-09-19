@@ -53,6 +53,7 @@ import type {
   CreateTransactionData,
   DeleteTransactionData,
   FindPendingTransactionAsOwnerData,
+  FindTransactionAsMemberData,
   GetHouseholdCategorySummaryData,
   GetHouseholdMonthlySummaryData,
   GetHouseholdSummaryData,
@@ -174,6 +175,10 @@ class StubPaymentAttemptRepository implements PaymentAttemptRepository {
   async markUncertain(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
     throw new Error('Not implemented in recurring transaction tests.');
   }
+
+  async findLatestForTransactionAsMember(): Promise<PaymentAttemptRecord | null> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
 }
 
 class StubTransactionRepository implements TransactionRepository {
@@ -214,6 +219,10 @@ class StubTransactionRepository implements TransactionRepository {
   async deleteAsMember(_data: DeleteTransactionData): Promise<void> {}
 
   async findPendingAsOwner(_data: FindPendingTransactionAsOwnerData): Promise<TransactionRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
+
+  async findByIdAsMember(_data: FindTransactionAsMemberData): Promise<TransactionRecord> {
     throw new Error('Not implemented in recurring transaction tests.');
   }
 }

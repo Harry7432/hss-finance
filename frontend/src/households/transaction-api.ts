@@ -103,6 +103,22 @@ export interface CreateTransactionInput {
   expenseNature?: 'fixed' | 'variable' | null;
 }
 
+export async function getTransaction(
+  householdId: string,
+  transactionId: string,
+): Promise<TransactionRecord> {
+  const result = await apiRequest<unknown>(
+    `/households/${householdId}/transactions/${transactionId}`,
+  );
+  const parsedResult = transactionRecordSchema.safeParse(result);
+
+  if (!parsedResult.success) {
+    throw new ApiError(200, 'INVALID_RESPONSE', 'O servidor retornou uma resposta inválida.');
+  }
+
+  return parsedResult.data;
+}
+
 export async function createTransaction(
   householdId: string,
   input: CreateTransactionInput,

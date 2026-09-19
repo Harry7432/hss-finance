@@ -69,6 +69,12 @@ export interface MarkPaymentAttemptOutcomeData {
   providerResourceId?: string;
 }
 
+export interface FindLatestPaymentAttemptData {
+  householdId: string;
+  requesterId: string;
+  transactionId: string;
+}
+
 export interface PaymentAttemptRepository {
   createPaymentAttempt(data: CreatePaymentAttemptData): Promise<PaymentAttemptRecord>;
   // All three transition from 'requested' only (see the state machine in PayBillService);
@@ -77,6 +83,11 @@ export interface PaymentAttemptRepository {
   markProcessing(data: MarkPaymentAttemptProcessingData): Promise<PaymentAttemptRecord>;
   markFailed(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord>;
   markUncertain(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord>;
+  // Returns null when the transaction exists (and is visible to the requester) but has no
+  // payment attempt yet — that is a valid state, not an error.
+  findLatestForTransactionAsMember(
+    data: FindLatestPaymentAttemptData,
+  ): Promise<PaymentAttemptRecord | null>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -243,6 +254,39 @@ export class TypeOrmPaymentAttemptRepository implements PaymentAttemptRepository
       attempt.status = 'uncertain';
       attempt.failureReason = data.failureReason;
     });
+  }
+
+  async findLatestForTransactionAsMember(
+    data: FindLatestPaymentAttemptData,
+  ): Promise<PaymentAttemptRecord | null> {
+    const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
+      select: { id: true },
+      where: {
+        household: { id: data.householdId },
+        user: { id: data.requesterId },
+      },
+    });
+
+    if (!membership) {
+      throw new ForbiddenError();
+    }
+
+    const transactionExists = await this.dataSource.getRepository(TransactionEntity).existsBy({
+      id: data.transactionId,
+      household: { id: data.householdId },
+    });
+
+    if (!transactionExists) {
+      throw new TransactionNotFoundError();
+    }
+
+    const attempt = await this.dataSource.getRepository(PaymentAttemptEntity).findOne({
+      where: { transaction: { id: data.transactionId } },
+      relations: { transaction: true, initiatedBy: true },
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+
+    return attempt ? toPaymentAttemptRecord(attempt) : null;
   }
 
   private async transitionFromRequested(

@@ -12,8 +12,8 @@ import type { TodayProvider } from '../services/list-transactions-service.js';
 import { createAsaasWebhookRouter } from './asaas-webhook-routes.js';
 import { createAuthRouter } from './auth-routes.js';
 import { createHealthRouter } from './health-routes.js';
+import type { AsaasIntegrationClient } from './household-routes.js';
 import { createHouseholdRouter } from './household-routes.js';
-import type { AsaasBillOperationsClient } from './transaction-routes.js';
 
 export function createApiRouter(
   database: DatabaseReadiness,
@@ -26,7 +26,7 @@ export function createApiRouter(
   recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
   secureCookie = false,
-  asaasClient?: AsaasBillOperationsClient,
+  asaasClient?: AsaasIntegrationClient,
   asaasWebhookRepository?: AsaasWebhookRepository,
   asaasWebhookToken?: string,
 ): Router {

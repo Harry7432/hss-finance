@@ -153,6 +153,10 @@ class FakePaymentAttemptRepository implements PaymentAttemptRepository {
       })
     );
   }
+
+  async findLatestForTransactionAsMember(): Promise<PaymentAttemptRecord | null> {
+    return null;
+  }
 }
 
 class FakePayBillClient implements PayBillClient {

@@ -2,6 +2,8 @@ import { Router } from 'express';
 
 import { createTransactionController } from '../controllers/create-transaction-controller.js';
 import { deleteTransactionController } from '../controllers/delete-transaction-controller.js';
+import { getPaymentAttemptController } from '../controllers/get-payment-attempt-controller.js';
+import { getTransactionController } from '../controllers/get-transaction-controller.js';
 import { listTransactionsController } from '../controllers/list-transactions-controller.js';
 import { payBillController } from '../controllers/pay-bill-controller.js';
 import { simulateBillPaymentController } from '../controllers/simulate-bill-payment-controller.js';
@@ -11,6 +13,8 @@ import type { PaymentAttemptRepository } from '../repositories/payment-attempt-r
 import type { TransactionRepository } from '../repositories/transaction-repository.js';
 import { CreateTransactionService } from '../services/create-transaction-service.js';
 import { DeleteTransactionService } from '../services/delete-transaction-service.js';
+import { GetPaymentAttemptService } from '../services/get-payment-attempt-service.js';
+import { GetTransactionService } from '../services/get-transaction-service.js';
 import {
   ListTransactionsService,
   type TodayProvider,
@@ -33,6 +37,8 @@ export function createTransactionRouter(
   const transactionRouter = Router({ mergeParams: true });
   const createTransaction = new CreateTransactionService(transactions);
   const deleteTransaction = new DeleteTransactionService(transactions);
+  const getTransaction = new GetTransactionService(transactions);
+  const getPaymentAttempt = new GetPaymentAttemptService(paymentAttempts);
   const listTransactions = new ListTransactionsService(transactions, todayProvider);
   const updateTransaction = new UpdateTransactionService(transactions);
   const simulateBillPayment = asaasClient
@@ -46,6 +52,8 @@ export function createTransactionRouter(
   transactionRouter.get('/', authenticate, listTransactionsController(listTransactions));
 
   transactionRouter.post('/', authenticate, createTransactionController(createTransaction));
+
+  transactionRouter.get('/:transactionId', authenticate, getTransactionController(getTransaction));
 
   transactionRouter.patch(
     '/:transactionId',
@@ -66,6 +74,12 @@ export function createTransactionRouter(
   );
 
   transactionRouter.post('/:transactionId/payment/bill', authenticate, payBillController(payBill));
+
+  transactionRouter.get(
+    '/:transactionId/payment/bill/attempt',
+    authenticate,
+    getPaymentAttemptController(getPaymentAttempt),
+  );
 
   return transactionRouter;
 }

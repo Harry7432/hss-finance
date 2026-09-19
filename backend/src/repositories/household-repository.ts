@@ -212,7 +212,7 @@ export class TypeOrmHouseholdRepository implements HouseholdRepository {
     userId: string,
   ): Promise<'owner' | 'member' | null> {
     const membership = await this.dataSource.getRepository(HouseholdMemberEntity).findOne({
-      select: { role: true },
+      select: { id: true, role: true },
       where: {
         household: { id: householdId },
         user: { id: userId },

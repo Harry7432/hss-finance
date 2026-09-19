@@ -24,10 +24,14 @@ import { GetHouseholdUserSummaryService } from '../services/get-household-user-s
 import { ListHouseholdMembersService } from '../services/list-household-members-service.js';
 import { ListHouseholdsService } from '../services/list-households-service.js';
 import type { TodayProvider } from '../services/list-transactions-service.js';
+import type { AsaasAccountClient } from './asaas-account-routes.js';
+import { createAsaasAccountRouter } from './asaas-account-routes.js';
 import { createCategoryRouter } from './category-routes.js';
 import { createRecurringTransactionRouter } from './recurring-transaction-routes.js';
 import type { AsaasBillOperationsClient } from './transaction-routes.js';
 import { createTransactionRouter } from './transaction-routes.js';
+
+export type AsaasIntegrationClient = AsaasBillOperationsClient & AsaasAccountClient;
 
 export function createHouseholdRouter(
   households: HouseholdRepository,
@@ -38,7 +42,7 @@ export function createHouseholdRouter(
   paymentAttempts: PaymentAttemptRepository,
   recurringTransactions: RecurringTransactionRepository,
   todayProvider?: TodayProvider,
-  asaasClient?: AsaasBillOperationsClient,
+  asaasClient?: AsaasIntegrationClient,
 ): Router {
   const householdRouter = Router();
   const addHouseholdMember = new AddHouseholdMemberService(households, users);
@@ -64,6 +68,10 @@ export function createHouseholdRouter(
   householdRouter.use(
     '/:householdId/recurring-transactions',
     createRecurringTransactionRouter(recurringTransactions, jwtSecret),
+  );
+  householdRouter.use(
+    '/:householdId/integrations/asaas',
+    createAsaasAccountRouter(households, jwtSecret, asaasClient),
   );
 
   householdRouter.post(

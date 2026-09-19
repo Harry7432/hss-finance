@@ -1,3 +1,5 @@
+import { Link } from 'react-router';
+
 import type { TransactionRecord } from '../../households/transaction-api';
 import type { TransactionRow, TransactionRowState } from '../../households/select-transactions';
 import { cn } from '../../lib/cn';
@@ -49,8 +51,11 @@ export function TransactionsList({ rows }: { rows: TransactionRow[] }) {
             <th scope="col" className="py-2 pr-4">
               Vencimento
             </th>
-            <th scope="col" className="py-2">
+            <th scope="col" className="py-2 pr-4">
               Status
+            </th>
+            <th scope="col" className="py-2">
+              <span className="sr-only">Ações</span>
             </th>
           </tr>
         </thead>
@@ -76,8 +81,18 @@ export function TransactionsList({ rows }: { rows: TransactionRow[] }) {
               <td className="py-3 pr-4 text-ink-muted">
                 {row.dueDate ? formatDateOnlyPtBR(row.dueDate) : '—'}
               </td>
-              <td className={cn('py-3 font-medium', STATE_TONE_CLASS[row.state])}>
+              <td className={cn('py-3 pr-4 font-medium', STATE_TONE_CLASS[row.state])}>
                 {STATE_LABEL[row.state]}
+              </td>
+              <td className="py-3 text-right">
+                {row.status === 'pending' ? (
+                  <Link
+                    to={`/app/transactions/${row.id}/pay`}
+                    className="whitespace-nowrap text-sm font-medium text-brand-strong hover:underline"
+                  >
+                    Pagar com Asaas
+                  </Link>
+                ) : null}
               </td>
             </tr>
           ))}
@@ -115,6 +130,14 @@ export function TransactionsList({ rows }: { rows: TransactionRow[] }) {
                 <dd>{formatDateOnlyPtBR(row.transactionDate)}</dd>
               </div>
             </dl>
+            {row.status === 'pending' ? (
+              <Link
+                to={`/app/transactions/${row.id}/pay`}
+                className="mt-3 inline-block text-sm font-medium text-brand-strong hover:underline"
+              >
+                Pagar com Asaas
+              </Link>
+            ) : null}
           </li>
         ))}
       </ul>

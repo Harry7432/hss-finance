@@ -12,11 +12,14 @@ import { TransactionAlreadyPaidError } from '../src/errors/transaction-already-p
 import { TransactionNotFoundError } from '../src/errors/transaction-not-found-error.js';
 import { AsaasClientError } from '../src/integrations/asaas/asaas-client.error.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
+import type { AsaasIntegrationClient } from '../src/routes/household-routes.js';
 import { createTransactionRouter } from '../src/routes/transaction-routes.js';
 import type {
+  AsaasBalance,
   AsaasBillPayment,
   AsaasBillSimulation,
   AsaasCreateBillPaymentInput,
+  AsaasFinancialTransactionPage,
   AsaasSimulateBillPaymentInput,
 } from '../src/integrations/asaas/asaas-client.js';
 import type {
@@ -54,6 +57,7 @@ import type {
   CreateTransactionData,
   DeleteTransactionData,
   FindPendingTransactionAsOwnerData,
+  FindTransactionAsMemberData,
   GetHouseholdCategorySummaryData,
   GetHouseholdMonthlySummaryData,
   GetHouseholdSummaryData,
@@ -69,7 +73,6 @@ import type {
   UpdateTransactionData,
 } from '../src/repositories/transaction-repository.js';
 import type { CreateUserData, UserRepository } from '../src/repositories/user-repository.js';
-import type { AsaasBillOperationsClient } from '../src/routes/transaction-routes.js';
 
 const TEST_JWT_SECRET = Buffer.alloc(32, 7);
 const USER_ID = randomUUID();
@@ -193,6 +196,10 @@ class StubPaymentAttemptRepository implements PaymentAttemptRepository {
   async markUncertain(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
     throw new Error('Not implemented in payment bill simulation tests.');
   }
+
+  async findLatestForTransactionAsMember(): Promise<PaymentAttemptRecord | null> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
 }
 
 class InMemoryTransactionRepository implements TransactionRepository {
@@ -262,9 +269,13 @@ class InMemoryTransactionRepository implements TransactionRepository {
 
     return transaction;
   }
+
+  async findByIdAsMember(_data: FindTransactionAsMemberData): Promise<TransactionRecord> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
 }
 
-class FakeAsaasClient implements AsaasBillOperationsClient {
+class FakeAsaasClient implements AsaasIntegrationClient {
   calls: AsaasSimulateBillPaymentInput[] = [];
 
   constructor(private readonly result: AsaasBillSimulation | Error = defaultSimulation()) {}
@@ -281,6 +292,14 @@ class FakeAsaasClient implements AsaasBillOperationsClient {
     }
 
     return this.result;
+  }
+
+  async getBalance(): Promise<AsaasBalance> {
+    throw new Error('Not used in payment bill simulation tests.');
+  }
+
+  async listFinancialTransactions(): Promise<AsaasFinancialTransactionPage> {
+    throw new Error('Not used in payment bill simulation tests.');
   }
 }
 
@@ -346,7 +365,7 @@ function grantMembership(
 
 function createTestContext(
   transactions = new InMemoryTransactionRepository(),
-  asaasClient: AsaasBillOperationsClient | undefined = new FakeAsaasClient(),
+  asaasClient: AsaasIntegrationClient | undefined = new FakeAsaasClient(),
 ) {
   const app = createApp(
     database,

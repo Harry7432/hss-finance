@@ -10,6 +10,10 @@ import { UserEntity } from './database/entities/user.entity.js';
 import { AsaasClient } from './integrations/asaas/asaas-client.js';
 import { errorHandler } from './middleware/error-handler.js';
 import {
+  TypeOrmAsaasWebhookRepository,
+  type AsaasWebhookRepository,
+} from './repositories/asaas-webhook-repository.js';
+import {
   TypeOrmCategoryRepository,
   type CategoryRepository,
 } from './repositories/category-repository.js';
@@ -40,6 +44,7 @@ const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
 const transactionRepository = new TypeOrmTransactionRepository(appDataSource);
 const paymentAttemptRepository = new TypeOrmPaymentAttemptRepository(appDataSource);
 const recurringTransactionRepository = new TypeOrmRecurringTransactionRepository(appDataSource);
+const asaasWebhookRepository = new TypeOrmAsaasWebhookRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
 // Undefined when ASAAS_API_KEY isn't set, so the app still boots (Sandbox-only, key is
 // optional at this stage); routes that need it degrade to a 503 instead of crashing.
@@ -58,6 +63,8 @@ export function createApp(
   recurringTransactions: RecurringTransactionRepository = recurringTransactionRepository,
   todayProvider?: TodayProvider,
   asaasClient: AsaasBillOperationsClient | undefined = defaultAsaasClient,
+  asaasWebhooks: AsaasWebhookRepository = asaasWebhookRepository,
+  asaasWebhookToken: string | undefined = env.asaasWebhookToken,
 ): Express {
   const app = express();
 
@@ -85,6 +92,8 @@ export function createApp(
       todayProvider,
       env.secureCookies,
       asaasClient,
+      asaasWebhooks,
+      asaasWebhookToken,
     ),
   );
   app.use(errorHandler);

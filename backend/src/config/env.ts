@@ -160,4 +160,9 @@ export const env = Object.freeze({
   // it's unset instead of failing to boot.
   asaasApiKey: parseOptionalSecret(process.env.ASAAS_API_KEY),
   asaasBaseUrl: parseAsaasBaseUrl(process.env.ASAAS_BASE_URL),
+  // Separate from ASAAS_API_KEY on purpose: this authenticates inbound webhook calls FROM
+  // Asaas, not outbound calls TO Asaas, and the two must never be interchangeable secrets.
+  // Optional so the app still boots without it; the webhook route fails closed (503) when unset
+  // instead of accepting unauthenticated requests.
+  asaasWebhookToken: parseOptionalSecret(process.env.ASAAS_WEBHOOK_TOKEN),
 });

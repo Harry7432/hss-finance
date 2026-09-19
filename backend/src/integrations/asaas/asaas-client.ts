@@ -56,6 +56,36 @@ export interface AsaasSimulateBillPaymentInput {
   identificationField: string;
 }
 
+export interface AsaasCreateBillPaymentInput {
+  identificationField: string;
+  // Required in the HSS flow: the caller's stable local identifier for this payment attempt
+  // (never the provider's own id — that doesn't exist yet at request time). Asaas returns it
+  // unchanged on the create/retrieve/list responses, which is what lets us find this payment
+  // again later if the connection drops before we learn Asaas's own id for it.
+  externalReference: string;
+  scheduleDate?: string;
+  value?: number;
+}
+
+// Deliberately excludes `identificationField` (never echo the digitable line back) and the
+// other response fields our domain doesn't need yet (description, discount/interest/fine,
+// companyName, transactionReceiptUrl, canBeCancelled, externalReference, failReasons).
+export interface AsaasBillPayment {
+  id: string;
+  status: string;
+  value: number | null;
+  dueDate: string | null;
+  scheduleDate: string | null;
+}
+
+interface AsaasBillPaymentResponse {
+  id: string;
+  status: string;
+  value: number | null | undefined;
+  dueDate: string | null | undefined;
+  scheduleDate: string | null | undefined;
+}
+
 export interface AsaasBillSimulation {
   value: number;
   dueDate: string;
@@ -176,6 +206,22 @@ function isAsaasBillSimulationBankSlipInfo(
     isOptionalNullableFiniteNumber(record.maxValue) &&
     isOptionalNullableString(record.beneficiaryName) &&
     isOptionalNullableString(record.companyName)
+  );
+}
+
+function isAsaasBillPaymentResponse(data: unknown): data is AsaasBillPaymentResponse {
+  if (data === null || typeof data !== 'object') return false;
+
+  const record = data as Record<string, unknown>;
+
+  return (
+    typeof record.id === 'string' &&
+    record.id.length > 0 &&
+    typeof record.status === 'string' &&
+    record.status.length > 0 &&
+    isOptionalNullableFiniteNumber(record.value) &&
+    isOptionalNullableString(record.dueDate) &&
+    isOptionalNullableString(record.scheduleDate)
   );
 }
 
@@ -347,6 +393,80 @@ export class AsaasClient {
     };
   }
 
+  // Real financial operation: creates a bill payment in Asaas Sandbox. Unlike
+  // simulateBillPayment, a 2xx here means Asaas may have started processing a real payment —
+  // callers must never retry blindly on a timeout/unavailable/unknown error (see PayBillService).
+  async createBillPayment(input: AsaasCreateBillPaymentInput): Promise<AsaasBillPayment> {
+    const identificationField = input.identificationField.trim();
+
+    if (identificationField.length === 0) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill payment requires a non-empty identificationField',
+      });
+    }
+
+    const externalReference = input.externalReference.trim();
+
+    if (externalReference.length === 0) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill payment requires a non-empty externalReference',
+      });
+    }
+
+    if (input.scheduleDate !== undefined && !isValidAsaasDateString(input.scheduleDate)) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill payment scheduleDate must be in YYYY-MM-DD format',
+      });
+    }
+
+    if (input.value !== undefined && (!Number.isFinite(input.value) || input.value <= 0)) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill payment value must be a positive finite number',
+      });
+    }
+
+    const body: Record<string, unknown> = { identificationField, externalReference };
+
+    if (input.scheduleDate !== undefined) {
+      body.scheduleDate = input.scheduleDate;
+    }
+
+    if (input.value !== undefined) {
+      body.value = input.value;
+    }
+
+    const response = await this.rawFetch('/bill', {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      throw await this.toBillPaymentClientError(response);
+    }
+
+    const data = await this.parseJson<unknown>(response);
+
+    if (!isAsaasBillPaymentResponse(data)) {
+      throw new AsaasClientError({
+        code: 'unknown',
+        message: 'Asaas bill payment response had an unexpected shape',
+      });
+    }
+
+    return {
+      id: data.id,
+      status: data.status,
+      value: data.value ?? null,
+      dueDate: data.dueDate ?? null,
+      scheduleDate: data.scheduleDate ?? null,
+    };
+  }
+
   private buildFinancialTransactionsQuery(options?: AsaasListFinancialTransactionsOptions): string {
     if (!options) return '';
 
@@ -458,6 +578,21 @@ export class AsaasClient {
       return new AsaasClientError({
         code: 'invalid_request',
         message: 'Asaas rejected the bill simulation request',
+      });
+    }
+
+    return this.toClientError(response);
+  }
+
+  // Same reasoning as toBillSimulationClientError: a 400 on /bill means Asaas rejected the
+  // identificationField/payment itself, so it is classified as invalid_request rather than
+  // falling into the shared classifyAsaasError mapping (which treats an unrecognized status as
+  // 'unknown', not appropriate here since this 400 is a well-documented rejection case).
+  private async toBillPaymentClientError(response: Response): Promise<AsaasClientError> {
+    if (response.status === 400) {
+      return new AsaasClientError({
+        code: 'invalid_request',
+        message: 'Asaas rejected the bill payment request',
       });
     }
 

@@ -31,6 +31,13 @@ import type {
   ListedHousehold,
   ListedHouseholdMember,
 } from '../src/repositories/household-repository.js';
+import type {
+  CreatePaymentAttemptData,
+  MarkPaymentAttemptOutcomeData,
+  MarkPaymentAttemptProcessingData,
+  PaymentAttemptRecord,
+  PaymentAttemptRepository,
+} from '../src/repositories/payment-attempt-repository.js';
 import {
   TypeOrmRecurringTransactionRepository,
   type CreateRecurringTransactionData,
@@ -149,6 +156,24 @@ class StubCategoryRepository implements CategoryRepository {
     _requesterId: string,
     _categoryId: string,
   ): Promise<void> {}
+}
+
+class StubPaymentAttemptRepository implements PaymentAttemptRepository {
+  async createPaymentAttempt(_data: CreatePaymentAttemptData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
+
+  async markProcessing(_data: MarkPaymentAttemptProcessingData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
+
+  async markFailed(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
+
+  async markUncertain(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in recurring transaction tests.');
+  }
 }
 
 class StubTransactionRepository implements TransactionRepository {
@@ -463,6 +488,7 @@ function createTestContext(recurringTransactions = new InMemoryRecurringTransact
     new StubHouseholdRepository(),
     new StubCategoryRepository(),
     new StubTransactionRepository(),
+    new StubPaymentAttemptRepository(),
     recurringTransactions,
   );
 

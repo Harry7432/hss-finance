@@ -18,6 +18,10 @@ import {
   type HouseholdRepository,
 } from './repositories/household-repository.js';
 import {
+  TypeOrmPaymentAttemptRepository,
+  type PaymentAttemptRepository,
+} from './repositories/payment-attempt-repository.js';
+import {
   TypeOrmRecurringTransactionRepository,
   type RecurringTransactionRepository,
 } from './repositories/recurring-transaction-repository.js';
@@ -27,13 +31,14 @@ import {
 } from './repositories/transaction-repository.js';
 import { TypeOrmUserRepository, type UserRepository } from './repositories/user-repository.js';
 import { createApiRouter } from './routes/index.js';
+import type { AsaasBillOperationsClient } from './routes/transaction-routes.js';
 import type { TodayProvider } from './services/list-transactions-service.js';
-import type { BillSimulationClient } from './services/simulate-bill-payment-service.js';
 
 const userRepository = new TypeOrmUserRepository(appDataSource.getRepository(UserEntity));
 const householdRepository = new TypeOrmHouseholdRepository(appDataSource);
 const categoryRepository = new TypeOrmCategoryRepository(appDataSource);
 const transactionRepository = new TypeOrmTransactionRepository(appDataSource);
+const paymentAttemptRepository = new TypeOrmPaymentAttemptRepository(appDataSource);
 const recurringTransactionRepository = new TypeOrmRecurringTransactionRepository(appDataSource);
 const jwtSecret = Buffer.from(jwtConfig.secret, 'base64');
 // Undefined when ASAAS_API_KEY isn't set, so the app still boots (Sandbox-only, key is
@@ -49,9 +54,10 @@ export function createApp(
   households: HouseholdRepository = householdRepository,
   categories: CategoryRepository = categoryRepository,
   transactions: TransactionRepository = transactionRepository,
+  paymentAttempts: PaymentAttemptRepository = paymentAttemptRepository,
   recurringTransactions: RecurringTransactionRepository = recurringTransactionRepository,
   todayProvider?: TodayProvider,
-  asaasClient: BillSimulationClient | undefined = defaultAsaasClient,
+  asaasClient: AsaasBillOperationsClient | undefined = defaultAsaasClient,
 ): Express {
   const app = express();
 
@@ -74,6 +80,7 @@ export function createApp(
       households,
       categories,
       transactions,
+      paymentAttempts,
       recurringTransactions,
       todayProvider,
       env.secureCookies,

@@ -16,12 +16,12 @@ import { UserEntity } from './user.entity.js';
 export type PaymentAttemptKind = 'bill' | 'pix_transfer';
 export type PaymentAttemptProvider = 'asaas';
 export type PaymentAttemptStatus =
-  'requested' | 'processing' | 'confirmed' | 'failed' | 'cancelled';
+  'requested' | 'processing' | 'confirmed' | 'failed' | 'cancelled' | 'uncertain';
 
 @Entity('payment_attempts')
 @Check("\"kind\" IN ('bill', 'pix_transfer')")
 @Check('"provider" IN (\'asaas\')')
-@Check("\"status\" IN ('requested', 'processing', 'confirmed', 'failed', 'cancelled')")
+@Check("\"status\" IN ('requested', 'processing', 'confirmed', 'failed', 'cancelled', 'uncertain')")
 @Check('"requested_amount" > 0')
 @Check('("status" = \'confirmed\') = ("confirmed_at" IS NOT NULL)')
 // idempotencyKey is generated server-side per attempt (see repository); it is NOT the

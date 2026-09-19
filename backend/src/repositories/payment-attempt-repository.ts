@@ -14,12 +14,20 @@ import { TransactionEntity } from '../database/entities/transaction.entity.js';
 import { ForbiddenError } from '../errors/forbidden-error.js';
 import { InvalidPaymentAmountError } from '../errors/invalid-payment-amount-error.js';
 import { PaymentAttemptAlreadyActiveError } from '../errors/payment-attempt-already-active-error.js';
+import { PaymentAttemptInvalidTransitionError } from '../errors/payment-attempt-invalid-transition-error.js';
+import { PaymentAttemptNotFoundError } from '../errors/payment-attempt-not-found-error.js';
 import { TransactionAlreadyPaidError } from '../errors/transaction-already-paid-error.js';
 import { TransactionNotFoundError } from '../errors/transaction-not-found-error.js';
 
 const UNIQUE_VIOLATION_CODE = '23505';
 const ACTIVE_PAYMENT_ATTEMPT_CONSTRAINT = 'uq_payment_attempts_active_per_transaction';
-const ACTIVE_PAYMENT_ATTEMPT_STATUSES: PaymentAttemptStatus[] = ['requested', 'processing'];
+// 'uncertain' (outcome unknown after a timeout/unparsable response) must keep blocking new
+// attempts just like 'requested'/'processing' — see the migration adding this status for why.
+const ACTIVE_PAYMENT_ATTEMPT_STATUSES: PaymentAttemptStatus[] = [
+  'requested',
+  'processing',
+  'uncertain',
+];
 
 export interface PaymentAttemptRecord {
   id: string;
@@ -45,8 +53,30 @@ export interface CreatePaymentAttemptData {
   requestedAmount: string;
 }
 
+export interface MarkPaymentAttemptProcessingData {
+  paymentAttemptId: string;
+  providerResourceId: string;
+}
+
+export interface MarkPaymentAttemptOutcomeData {
+  paymentAttemptId: string;
+  failureReason: string;
+  // Only meaningful for markUncertain: Asaas may have accepted the bill payment (and returned
+  // its id) even though we failed to persist that locally as 'processing' — passing it here
+  // means we don't lose the one piece of data that could later correlate this attempt to the
+  // remote payment. markFailed never receives one: a definite rejection means Asaas never
+  // created anything.
+  providerResourceId?: string;
+}
+
 export interface PaymentAttemptRepository {
   createPaymentAttempt(data: CreatePaymentAttemptData): Promise<PaymentAttemptRecord>;
+  // All three transition from 'requested' only (see the state machine in PayBillService);
+  // calling any of them on a payment attempt that already moved on throws
+  // PaymentAttemptInvalidTransitionError rather than silently overwriting it.
+  markProcessing(data: MarkPaymentAttemptProcessingData): Promise<PaymentAttemptRecord>;
+  markFailed(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord>;
+  markUncertain(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -72,6 +102,17 @@ function normalizeAmount(value: string): string | null {
   const fraction = (match[2] ?? '').padEnd(2, '0');
 
   return `${integer}.${fraction}`;
+}
+
+// provider_resource_id is write-once per attempt: once Asaas has told us its id for this
+// payment, nothing may silently replace it with a different value. The same id arriving twice
+// (e.g. a caller retrying its own local write) is accepted as a no-op.
+function assignProviderResourceId(attempt: PaymentAttemptEntity, providerResourceId: string): void {
+  if (attempt.providerResourceId !== null && attempt.providerResourceId !== providerResourceId) {
+    throw new PaymentAttemptInvalidTransitionError();
+  }
+
+  attempt.providerResourceId = providerResourceId;
 }
 
 function toPaymentAttemptRecord(entity: PaymentAttemptEntity): PaymentAttemptRecord {
@@ -172,6 +213,66 @@ export class TypeOrmPaymentAttemptRepository implements PaymentAttemptRepository
 
         throw error;
       }
+    });
+  }
+
+  async markProcessing(data: MarkPaymentAttemptProcessingData): Promise<PaymentAttemptRecord> {
+    return this.transitionFromRequested(data.paymentAttemptId, (attempt) => {
+      assignProviderResourceId(attempt, data.providerResourceId);
+      attempt.status = 'processing';
+    });
+  }
+
+  async markFailed(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    return this.transitionFromRequested(data.paymentAttemptId, (attempt) => {
+      attempt.status = 'failed';
+      attempt.failureReason = data.failureReason;
+    });
+  }
+
+  // Transitions straight from 'requested' -> 'uncertain', including when the provider's id is
+  // already known (Asaas accepted the payment but the local write that would have moved this
+  // attempt to 'processing' failed) — there is no intermediate 'processing' -> 'uncertain' hop
+  // to model, since that local write never committed.
+  async markUncertain(data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    return this.transitionFromRequested(data.paymentAttemptId, (attempt) => {
+      if (data.providerResourceId !== undefined) {
+        assignProviderResourceId(attempt, data.providerResourceId);
+      }
+
+      attempt.status = 'uncertain';
+      attempt.failureReason = data.failureReason;
+    });
+  }
+
+  private async transitionFromRequested(
+    paymentAttemptId: string,
+    applyPatch: (attempt: PaymentAttemptEntity) => void,
+  ): Promise<PaymentAttemptRecord> {
+    return this.dataSource.transaction(async (manager) => {
+      // tables: ['payment_attempts'] restricts FOR UPDATE to this row only — without it,
+      // Postgres locks the joined transaction/user rows too, which can deadlock against
+      // createPaymentAttempt's own lock on the transactions row (same fix as
+      // TypeOrmTransactionRepository.updateAsMember for the same reason).
+      const attempt = await manager.findOne(PaymentAttemptEntity, {
+        where: { id: paymentAttemptId },
+        relations: { transaction: true, initiatedBy: true },
+        lock: { mode: 'pessimistic_write', tables: ['payment_attempts'] },
+      });
+
+      if (!attempt) {
+        throw new PaymentAttemptNotFoundError();
+      }
+
+      if (attempt.status !== 'requested') {
+        throw new PaymentAttemptInvalidTransitionError();
+      }
+
+      applyPatch(attempt);
+
+      const saved = await manager.getRepository(PaymentAttemptEntity).save(attempt);
+
+      return toPaymentAttemptRecord(saved);
     });
   }
 }

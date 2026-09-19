@@ -19,6 +19,7 @@ import { CreateBankConnections1789380000000 } from './migrations/1789380000000-c
 import { CreateBankAccounts1789390000000 } from './migrations/1789390000000-create-bank-accounts.js';
 import { AddBankAccountToTransactions1789400000000 } from './migrations/1789400000000-add-bank-account-to-transactions.js';
 import { CreatePaymentAttempts1789410000000 } from './migrations/1789410000000-create-payment-attempts.js';
+import { AddPaymentAttemptUncertainStatus1789420000000 } from './migrations/1789420000000-add-payment-attempt-uncertain-status.js';
 
 export const appDataSource = new DataSource({
   type: 'postgres',
@@ -44,6 +45,7 @@ export const appDataSource = new DataSource({
     CreateBankAccounts1789390000000,
     AddBankAccountToTransactions1789400000000,
     CreatePaymentAttempts1789410000000,
+    AddPaymentAttemptUncertainStatus1789420000000,
   ],
   subscribers: [],
   uuidExtension: 'pgcrypto',

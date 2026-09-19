@@ -14,7 +14,9 @@ import { AsaasClientError } from '../src/integrations/asaas/asaas-client.error.j
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { createTransactionRouter } from '../src/routes/transaction-routes.js';
 import type {
+  AsaasBillPayment,
   AsaasBillSimulation,
+  AsaasCreateBillPaymentInput,
   AsaasSimulateBillPaymentInput,
 } from '../src/integrations/asaas/asaas-client.js';
 import type {
@@ -42,6 +44,13 @@ import type {
   UpdateRecurringTransactionData,
 } from '../src/repositories/recurring-transaction-repository.js';
 import type {
+  CreatePaymentAttemptData,
+  MarkPaymentAttemptOutcomeData,
+  MarkPaymentAttemptProcessingData,
+  PaymentAttemptRecord,
+  PaymentAttemptRepository,
+} from '../src/repositories/payment-attempt-repository.js';
+import type {
   CreateTransactionData,
   DeleteTransactionData,
   FindPendingTransactionAsOwnerData,
@@ -60,7 +69,7 @@ import type {
   UpdateTransactionData,
 } from '../src/repositories/transaction-repository.js';
 import type { CreateUserData, UserRepository } from '../src/repositories/user-repository.js';
-import type { BillSimulationClient } from '../src/services/simulate-bill-payment-service.js';
+import type { AsaasBillOperationsClient } from '../src/routes/transaction-routes.js';
 
 const TEST_JWT_SECRET = Buffer.alloc(32, 7);
 const USER_ID = randomUUID();
@@ -168,6 +177,24 @@ class StubRecurringTransactionRepository implements RecurringTransactionReposito
   }
 }
 
+class StubPaymentAttemptRepository implements PaymentAttemptRepository {
+  async createPaymentAttempt(_data: CreatePaymentAttemptData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
+
+  async markProcessing(_data: MarkPaymentAttemptProcessingData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
+
+  async markFailed(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
+
+  async markUncertain(_data: MarkPaymentAttemptOutcomeData): Promise<PaymentAttemptRecord> {
+    throw new Error('Not implemented in payment bill simulation tests.');
+  }
+}
+
 class InMemoryTransactionRepository implements TransactionRepository {
   readonly records: Array<TransactionRecord & { householdId: string }> = [];
   readonly memberships: Array<{ householdId: string; userId: string; role: 'owner' | 'member' }> =
@@ -237,10 +264,14 @@ class InMemoryTransactionRepository implements TransactionRepository {
   }
 }
 
-class FakeAsaasClient implements BillSimulationClient {
+class FakeAsaasClient implements AsaasBillOperationsClient {
   calls: AsaasSimulateBillPaymentInput[] = [];
 
   constructor(private readonly result: AsaasBillSimulation | Error = defaultSimulation()) {}
+
+  async createBillPayment(_input: AsaasCreateBillPaymentInput): Promise<AsaasBillPayment> {
+    throw new Error('Not used in payment bill simulation tests.');
+  }
 
   async simulateBillPayment(input: AsaasSimulateBillPaymentInput): Promise<AsaasBillSimulation> {
     this.calls.push(input);
@@ -315,7 +346,7 @@ function grantMembership(
 
 function createTestContext(
   transactions = new InMemoryTransactionRepository(),
-  asaasClient: BillSimulationClient | undefined = new FakeAsaasClient(),
+  asaasClient: AsaasBillOperationsClient | undefined = new FakeAsaasClient(),
 ) {
   const app = createApp(
     database,
@@ -324,6 +355,7 @@ function createTestContext(
     new StubHouseholdRepository(),
     new StubCategoryRepository(),
     transactions,
+    new StubPaymentAttemptRepository(),
     new StubRecurringTransactionRepository(),
     undefined,
     asaasClient,
@@ -540,7 +572,7 @@ describe('POST /api/households/:householdId/transactions/:transactionId/payment/
     app.use(express.json());
     app.use(
       '/api/households/:householdId/transactions',
-      createTransactionRouter(transactions, TEST_JWT_SECRET),
+      createTransactionRouter(transactions, new StubPaymentAttemptRepository(), TEST_JWT_SECRET),
     );
     app.use(errorHandler);
     const token = await createToken(USER_ID);

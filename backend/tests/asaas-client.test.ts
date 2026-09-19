@@ -718,9 +718,7 @@ describe('AsaasClient', () => {
     });
 
     it('normalizes missing top-level fee and minimumScheduleDate to null', async () => {
-      const { client } = createClient([
-        jsonResponse(200, { bankSlipInfo: fullBankSlipInfo() }),
-      ]);
+      const { client } = createClient([jsonResponse(200, { bankSlipInfo: fullBankSlipInfo() })]);
 
       const result = await client.simulateBillPayment({
         identificationField: IDENTIFICATION_FIELD,
@@ -1009,6 +1007,409 @@ describe('AsaasClient', () => {
       let thrown: unknown;
       try {
         await client.simulateBillPayment({ identificationField: IDENTIFICATION_FIELD });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(AsaasClientError);
+      expect((thrown as Error).message).not.toContain(CONFIG.apiKey);
+    });
+  });
+
+  describe('createBillPayment', () => {
+    const IDENTIFICATION_FIELD = '03399.77779 29900.000000 04751.101017 1 81510000002990';
+    const EXTERNAL_REFERENCE = '8f14e45f-ceea-467e-bd22-0d8b2c1d0c99';
+
+    function billPaymentResponse(overrides: Partial<Record<string, unknown>> = {}): unknown {
+      return {
+        id: 'bill_000001',
+        status: 'PENDING',
+        value: 150,
+        dueDate: '2026-09-20',
+        scheduleDate: '2026-09-18',
+        ...overrides,
+      };
+    }
+
+    it('requests POST /bill authenticated via the access_token header', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(calls[0]?.url).toBe('https://sandbox.asaas.test/v3/bill');
+      expect(calls[0]?.init?.method).toBe('POST');
+      expect(requestHeader(calls[0], 'access_token')).toBe('sandbox-api-key');
+    });
+
+    it('sends identificationField and externalReference in the request body when no optional field is given', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      );
+    });
+
+    it('trims the identificationField before sending it', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: `  ${IDENTIFICATION_FIELD}  `,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      );
+    });
+
+    it('trims the externalReference before sending it', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: `  ${EXTERNAL_REFERENCE}  `,
+      });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      );
+    });
+
+    it('includes scheduleDate in the request body when provided', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+        scheduleDate: '2026-09-19',
+      });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+          scheduleDate: '2026-09-19',
+        }),
+      );
+    });
+
+    it('includes value in the request body when provided', async () => {
+      const { client, calls } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+        value: 42.5,
+      });
+
+      expect(calls[0]?.init?.body).toBe(
+        JSON.stringify({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+          value: 42.5,
+        }),
+      );
+    });
+
+    it('rejects an empty identificationField before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: '',
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a whitespace-only identificationField before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: '   ',
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects an empty externalReference before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: '',
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a whitespace-only externalReference before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: '   ',
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a malformed scheduleDate before calling fetch', async () => {
+      const { client, calls } = createClient([]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+          scheduleDate: '19-09-2026',
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([0, -10, NaN, Infinity])(
+      'rejects an invalid value (%s) before calling fetch',
+      async (value) => {
+        const { client, calls } = createClient([]);
+
+        await expect(
+          client.createBillPayment({
+            identificationField: IDENTIFICATION_FIELD,
+            externalReference: EXTERNAL_REFERENCE,
+            value,
+          }),
+        ).rejects.toMatchObject({ code: 'unknown' });
+        expect(calls).toHaveLength(0);
+      },
+    );
+
+    it('returns a normalized bill payment for a valid response', async () => {
+      const { client } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      const result = await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(result).toEqual({
+        id: 'bill_000001',
+        status: 'PENDING',
+        value: 150,
+        dueDate: '2026-09-20',
+        scheduleDate: '2026-09-18',
+      });
+    });
+
+    it('does not include the identificationField in the returned bill payment', async () => {
+      const { client } = createClient([jsonResponse(200, billPaymentResponse())]);
+
+      const result = await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(JSON.stringify(result)).not.toContain(IDENTIFICATION_FIELD);
+    });
+
+    it('normalizes missing value, dueDate and scheduleDate to null', async () => {
+      const { client } = createClient([
+        jsonResponse(200, { id: 'bill_000002', status: 'PENDING' }),
+      ]);
+
+      const result = await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(result).toEqual({
+        id: 'bill_000002',
+        status: 'PENDING',
+        value: null,
+        dueDate: null,
+        scheduleDate: null,
+      });
+    });
+
+    it('passes through any status string reported by Asaas', async () => {
+      const { client } = createClient([
+        jsonResponse(200, billPaymentResponse({ status: 'BANK_PROCESSING' })),
+      ]);
+
+      const result = await client.createBillPayment({
+        identificationField: IDENTIFICATION_FIELD,
+        externalReference: EXTERNAL_REFERENCE,
+      });
+
+      expect(result.status).toBe('BANK_PROCESSING');
+    });
+
+    it('maps a response missing id to unknown', async () => {
+      const { client } = createClient([jsonResponse(200, billPaymentResponse({ id: undefined }))]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('maps a response missing status to unknown', async () => {
+      const { client } = createClient([
+        jsonResponse(200, billPaymentResponse({ status: undefined })),
+      ]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('maps a 400 (invalid bill) response to invalid_request', async () => {
+      const { client } = createClient([
+        jsonResponse(400, { errors: [{ code: 'invalid_billet', description: 'Invalid bill' }] }),
+      ]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    });
+
+    it('never includes the identificationField in a 400 error message', async () => {
+      const { client } = createClient([jsonResponse(400, { errors: [] })]);
+
+      let thrown: unknown;
+      try {
+        await client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(AsaasClientError);
+      expect((thrown as Error).message).not.toContain(IDENTIFICATION_FIELD);
+    });
+
+    it('does not include the externalReference in a 400 error message', async () => {
+      const { client } = createClient([jsonResponse(400, { errors: [] })]);
+
+      let thrown: unknown;
+      try {
+        await client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(AsaasClientError);
+      expect((thrown as Error).message).not.toContain(EXTERNAL_REFERENCE);
+    });
+
+    it.each([401, 403])('maps status %d to authentication', async (status) => {
+      const { client } = createClient([jsonResponse(status, { errors: [] })]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'authentication' });
+    });
+
+    it('maps 429 to rate_limit', async () => {
+      const { client } = createClient([jsonResponse(429, { errors: [] })]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'rate_limit' });
+    });
+
+    it.each([500, 502, 503])('maps status %d to unavailable', async (status) => {
+      const { client } = createClient([jsonResponse(status, {})]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unavailable' });
+    });
+
+    it('maps network and timeout failures to unavailable without retrying', async () => {
+      const fetchImpl: AsaasFetch = async () => {
+        throw new DOMException('The operation was aborted', 'TimeoutError');
+      };
+      const client = new AsaasClient(CONFIG, fetchImpl);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unavailable' });
+    });
+
+    it('maps an unparsable JSON response to unknown', async () => {
+      const badResponse = {
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error('invalid json');
+        },
+      } as unknown as Response;
+      const { client } = createClient([badResponse]);
+
+      await expect(
+        client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        }),
+      ).rejects.toMatchObject({ code: 'unknown' });
+    });
+
+    it('never exposes the API key in the error message', async () => {
+      const { client } = createClient([jsonResponse(401, { errors: [] })]);
+
+      let thrown: unknown;
+      try {
+        await client.createBillPayment({
+          identificationField: IDENTIFICATION_FIELD,
+          externalReference: EXTERNAL_REFERENCE,
+        });
       } catch (error) {
         thrown = error;
       }

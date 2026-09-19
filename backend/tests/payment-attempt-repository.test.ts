@@ -11,6 +11,8 @@ import { UserEntity } from '../src/database/entities/user.entity.js';
 import { ForbiddenError } from '../src/errors/forbidden-error.js';
 import { InvalidPaymentAmountError } from '../src/errors/invalid-payment-amount-error.js';
 import { PaymentAttemptAlreadyActiveError } from '../src/errors/payment-attempt-already-active-error.js';
+import { PaymentAttemptInvalidTransitionError } from '../src/errors/payment-attempt-invalid-transition-error.js';
+import { PaymentAttemptNotFoundError } from '../src/errors/payment-attempt-not-found-error.js';
 import { TransactionAlreadyPaidError } from '../src/errors/transaction-already-paid-error.js';
 import { TransactionNotFoundError } from '../src/errors/transaction-not-found-error.js';
 import type { PaymentAttemptRecord } from '../src/repositories/payment-attempt-repository.js';
@@ -19,6 +21,7 @@ import { TypeOrmPaymentAttemptRepository } from '../src/repositories/payment-att
 const HOUSEHOLD_ID = randomUUID();
 const OWNER_ID = randomUUID();
 const TRANSACTION_ID = randomUUID();
+const PAYMENT_ATTEMPT_ID = randomUUID();
 
 const NOW = new Date('2026-02-01T10:00:00.000Z');
 
@@ -468,6 +471,235 @@ describe('TypeOrmPaymentAttemptRepository (authorization and validation)', () =>
   });
 });
 
+describe('TypeOrmPaymentAttemptRepository (status transitions)', () => {
+  function buildManagerFor(attempt: PaymentAttemptEntity | null): {
+    manager: EntityManager;
+    dataSource: DataSource;
+    findOneCalls: Array<{ entity: unknown; options: unknown }>;
+    saved: PaymentAttemptEntity[];
+  } {
+    const findOneCalls: Array<{ entity: unknown; options: unknown }> = [];
+    const saved: PaymentAttemptEntity[] = [];
+
+    const manager = {
+      async findOne(entity: unknown, options: unknown): Promise<PaymentAttemptEntity | null> {
+        findOneCalls.push({ entity, options });
+        return attempt;
+      },
+      getRepository(): Repository<PaymentAttemptEntity> {
+        return {
+          async save(entityToSave: PaymentAttemptEntity): Promise<PaymentAttemptEntity> {
+            saved.push(entityToSave);
+            return entityToSave;
+          },
+        } as unknown as Repository<PaymentAttemptEntity>;
+      },
+    } as unknown as EntityManager;
+
+    const dataSource = {
+      async transaction<T>(
+        operation: (transactionManager: EntityManager) => Promise<T>,
+      ): Promise<T> {
+        return operation(manager);
+      },
+    } as unknown as DataSource;
+
+    return { manager, dataSource, findOneCalls, saved };
+  }
+
+  function requestedAttempt(overrides: Partial<PaymentAttemptEntity> = {}): PaymentAttemptEntity {
+    return Object.assign(new PaymentAttemptEntity(), {
+      id: PAYMENT_ATTEMPT_ID,
+      transaction: Object.assign(new TransactionEntity(), { id: TRANSACTION_ID }),
+      initiatedBy: Object.assign(new UserEntity(), { id: OWNER_ID }),
+      kind: 'bill',
+      provider: 'asaas',
+      providerResourceId: null,
+      idempotencyKey: 'idempotency-key',
+      status: 'requested',
+      requestedAmount: '150.00',
+      failureReason: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      confirmedAt: null,
+      ...overrides,
+    });
+  }
+
+  describe('markProcessing', () => {
+    it('transitions requested -> processing and stores the provider resource id', async () => {
+      const attempt = requestedAttempt();
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      const result = await repository.markProcessing({
+        paymentAttemptId: PAYMENT_ATTEMPT_ID,
+        providerResourceId: 'bill_000001',
+      });
+
+      expect(saved).toHaveLength(1);
+      expect(saved[0]).toMatchObject({ status: 'processing', providerResourceId: 'bill_000001' });
+      expect(result).toMatchObject({
+        id: PAYMENT_ATTEMPT_ID,
+        status: 'processing',
+        providerResourceId: 'bill_000001',
+      });
+    });
+
+    it.each(['processing', 'confirmed', 'failed', 'cancelled', 'uncertain'] as const)(
+      'rejects transitioning from %s',
+      async (status) => {
+        const attempt = requestedAttempt({ status });
+        const { dataSource } = buildManagerFor(attempt);
+        const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+        await expect(
+          repository.markProcessing({
+            paymentAttemptId: PAYMENT_ATTEMPT_ID,
+            providerResourceId: 'bill_000001',
+          }),
+        ).rejects.toBeInstanceOf(PaymentAttemptInvalidTransitionError);
+      },
+    );
+
+    it('rejects a different provider resource id than the one already stored, without saving', async () => {
+      const attempt = requestedAttempt({ providerResourceId: 'bill_existing' });
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      await expect(
+        repository.markProcessing({
+          paymentAttemptId: PAYMENT_ATTEMPT_ID,
+          providerResourceId: 'bill_different',
+        }),
+      ).rejects.toBeInstanceOf(PaymentAttemptInvalidTransitionError);
+
+      expect(saved).toHaveLength(0);
+    });
+
+    it('accepts the same provider resource id already stored (idempotent)', async () => {
+      const attempt = requestedAttempt({ providerResourceId: 'bill_existing' });
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      const result = await repository.markProcessing({
+        paymentAttemptId: PAYMENT_ATTEMPT_ID,
+        providerResourceId: 'bill_existing',
+      });
+
+      expect(saved).toHaveLength(1);
+      expect(result).toMatchObject({ status: 'processing', providerResourceId: 'bill_existing' });
+    });
+
+    it('rejects when the payment attempt does not exist', async () => {
+      const { dataSource } = buildManagerFor(null);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      await expect(
+        repository.markProcessing({
+          paymentAttemptId: PAYMENT_ATTEMPT_ID,
+          providerResourceId: 'bill_000001',
+        }),
+      ).rejects.toBeInstanceOf(PaymentAttemptNotFoundError);
+    });
+  });
+
+  describe('markFailed', () => {
+    it('transitions requested -> failed and stores the failure reason', async () => {
+      const attempt = requestedAttempt();
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      const result = await repository.markFailed({
+        paymentAttemptId: PAYMENT_ATTEMPT_ID,
+        failureReason:
+          'Asaas bill payment request failed with provider error code: invalid_request',
+      });
+
+      expect(saved[0]).toMatchObject({ status: 'failed' });
+      expect(result.status).toBe('failed');
+      expect(result.failureReason).toBe(
+        'Asaas bill payment request failed with provider error code: invalid_request',
+      );
+    });
+
+    it('rejects transitioning from a non-requested status', async () => {
+      const attempt = requestedAttempt({ status: 'processing' });
+      const { dataSource } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      await expect(
+        repository.markFailed({
+          paymentAttemptId: PAYMENT_ATTEMPT_ID,
+          failureReason: 'irrelevant',
+        }),
+      ).rejects.toBeInstanceOf(PaymentAttemptInvalidTransitionError);
+    });
+  });
+
+  describe('markUncertain', () => {
+    it('transitions requested -> uncertain and stores the failure reason', async () => {
+      const attempt = requestedAttempt();
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      const result = await repository.markUncertain({
+        paymentAttemptId: PAYMENT_ATTEMPT_ID,
+        failureReason: 'Asaas bill payment request failed with provider error code: unavailable',
+      });
+
+      expect(saved[0]).toMatchObject({ status: 'uncertain' });
+      expect(result.status).toBe('uncertain');
+      expect(result.providerResourceId).toBeNull();
+    });
+
+    it('stores the provider resource id when given (provider accepted the payment but processing failed to persist)', async () => {
+      const attempt = requestedAttempt();
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      const result = await repository.markUncertain({
+        paymentAttemptId: PAYMENT_ATTEMPT_ID,
+        failureReason:
+          'Asaas accepted the bill payment but the local attempt could not be persisted as processing',
+        providerResourceId: 'bill_555',
+      });
+
+      expect(saved[0]).toMatchObject({ status: 'uncertain', providerResourceId: 'bill_555' });
+      expect(result.providerResourceId).toBe('bill_555');
+    });
+
+    it('rejects a different provider resource id than the one already stored, without saving', async () => {
+      const attempt = requestedAttempt({ providerResourceId: 'bill_existing' });
+      const { dataSource, saved } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      await expect(
+        repository.markUncertain({
+          paymentAttemptId: PAYMENT_ATTEMPT_ID,
+          failureReason: 'mismatch',
+          providerResourceId: 'bill_different',
+        }),
+      ).rejects.toBeInstanceOf(PaymentAttemptInvalidTransitionError);
+
+      expect(saved).toHaveLength(0);
+    });
+
+    it('rejects transitioning from a non-requested status', async () => {
+      const attempt = requestedAttempt({ status: 'uncertain' });
+      const { dataSource } = buildManagerFor(attempt);
+      const repository = new TypeOrmPaymentAttemptRepository(dataSource);
+
+      await expect(
+        repository.markUncertain({
+          paymentAttemptId: PAYMENT_ATTEMPT_ID,
+          failureReason: 'irrelevant',
+        }),
+      ).rejects.toBeInstanceOf(PaymentAttemptInvalidTransitionError);
+    });
+  });
+});
+
 describe('TypeOrmPaymentAttemptRepository (real PostgreSQL concurrency)', () => {
   let user: UserEntity;
   let household: HouseholdEntity;
@@ -531,7 +763,9 @@ describe('TypeOrmPaymentAttemptRepository (real PostgreSQL concurrency)', () => 
   afterEach(async () => {
     // transaction_id is RESTRICT, so any PaymentAttempt left over from the test must be
     // cleared before the household delete cascades into deleting the transaction.
-    await appDataSource.manager.delete(PaymentAttemptEntity, { transaction: { id: transaction.id } });
+    await appDataSource.manager.delete(PaymentAttemptEntity, {
+      transaction: { id: transaction.id },
+    });
     await appDataSource.manager.delete(HouseholdEntity, { id: household.id });
     await appDataSource.manager.delete(UserEntity, { id: user.id });
   });
